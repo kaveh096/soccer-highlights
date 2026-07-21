@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Generated pipeline output (clips, event logs, debug plots)
+/output/
+

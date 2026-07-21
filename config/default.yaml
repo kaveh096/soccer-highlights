@@ -1,0 +1,63 @@
+# Sunday Soccer Highlights Engine - default configuration
+# Every value here can be overridden by env vars prefixed SOCCER_HL__
+# (e.g. SOCCER_HL__DETECTION__THRESHOLD_SIGMA=3.0) or a --config override file.
+
+input:
+  # Directory containing one recording session's DJI_*.MP4 (+ .LRF) chunks.
+  source_dir: "D:/DCIM/DJI_001"
+  # Use the small .LRF proxy for audio analysis instead of the full-res .MP4.
+  # Audio streams are identical; LRF is ~1/16th the size, so this avoids ever
+  # reading the full 4K files during detection.
+  use_lrf_for_detection: true
+
+audio:
+  # Target sample rate for analysis (Hz). 22050 is plenty for envelope/onset
+  # detection and halves the data volume vs the source's 48000.
+  sample_rate: 22050
+  mono: true
+
+detection:
+  # Which strategy to use: "rms_energy" or "onset_flux"
+  strategy: "rms_energy"
+
+  rms_energy:
+    # Analysis window / hop size, in seconds, for the RMS-dB envelope.
+    window_seconds: 0.5
+    hop_seconds: 0.1
+    # Rolling baseline window (seconds) used to compute the local adaptive
+    # threshold (median + threshold_sigma * MAD).
+    baseline_window_seconds: 60.0
+    threshold_sigma: 3.0
+    # Absolute floor in dBFS below which a frame is never considered a peak,
+    # regardless of how it compares to the local baseline (avoids flagging
+    # peaks during silence/near-silence stretches).
+    min_absolute_dbfs: -40.0
+
+  onset_flux:
+    window_seconds: 0.05
+    hop_seconds: 0.01
+    baseline_window_seconds: 30.0
+    threshold_sigma: 2.5
+
+timeline:
+  # Seconds of context to keep before each detected peak.
+  lookback_seconds: 45.0
+  # Seconds of context to keep after each detected peak.
+  post_peak_seconds: 8.0
+  # Minimum silence gap (seconds) required between two intervals for them to
+  # stay separate; anything closer gets merged into one continuous highlight.
+  min_gap_seconds: 5.0
+  # Drop any merged interval shorter than this (guards against edge noise).
+  min_interval_seconds: 5.0
+
+output:
+  # "clips" = one file per highlight, "concat" = single combined reel.
+  mode: "clips"
+  dir: "output"
+  # Re-encode on concat join instead of stream-copy. Needed only if clips
+  # span a chunk boundary with a codec/timestamp discontinuity.
+  force_reencode_on_concat: false
+
+metadata:
+  events_path: "output/events.json"
+  debug_plot_path: "output/debug_audio.png"
