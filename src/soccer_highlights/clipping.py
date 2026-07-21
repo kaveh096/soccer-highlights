@@ -40,7 +40,7 @@ def concat_clips(clip_paths: list[Path], out_path: Path, force_reencode: bool = 
         list_path = Path(list_file.name)
     try:
         args = ["-f", "concat", "-safe", "0", "-i", str(list_path)]
-        args += ["-c", "aac"] if force_reencode else ["-c", "copy"]
+        args += ["-c:v", "libx264", "-c:a", "aac", "-strict", "-2"] if force_reencode else ["-c", "copy"]
         _run_ffmpeg([*args, str(out_path)])
     finally:
         list_path.unlink(missing_ok=True)

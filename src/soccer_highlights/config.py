@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
@@ -66,6 +67,9 @@ class TimelineConfig:
     post_peak_seconds: float = 8.0
     min_gap_seconds: float = 5.0
     min_interval_seconds: float = 5.0
+    # Ignore any peak before this point in the whole session -- camera
+    # handling/setup noise at recording start isn't a real event.
+    warmup_seconds: float = 10.0
 
 
 @dataclass
@@ -82,6 +86,30 @@ class MetadataConfig:
 
 
 @dataclass
+class ReviewConfig:
+    # Review clips are always sourced from the small .LRF proxy, never the
+    # full-res source -- far cheaper to decode/re-encode, and plenty for
+    # judging whether a detection was a true or false positive.
+    output_root: str = "output/review"
+    max_width: int = 640
+    fps: float = 15.0
+    crf: int = 30
+    # "ultrafast" despite the name is the LIGHTEST x264 preset on the CPU
+    # (worse compression, more CPU time saved) -- picked deliberately after
+    # this machine crashed twice overnight under sustained encode load.
+    # Compression ratio doesn't matter for small low-res review clips.
+    preset: str = "ultrafast"
+    # Cap thread count so encoding doesn't pin every core at once; reduces
+    # sustained thermal/power load on an older laptop running unattended.
+    threads: int = 2
+    audio_bitrate_kbps: int = 64
+    # Negative-space clips: gaps not covered by ANY strategy's candidate
+    # intervals, chunked for review so nothing is silently missed.
+    max_negative_clip_seconds: float = 120.0
+    min_negative_clip_seconds: float = 8.0
+
+
+@dataclass
 class Config:
     input: InputConfig = field(default_factory=InputConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
@@ -89,6 +117,7 @@ class Config:
     timeline: TimelineConfig = field(default_factory=TimelineConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     metadata: MetadataConfig = field(default_factory=MetadataConfig)
+    review: ReviewConfig = field(default_factory=ReviewConfig)
 
 
 def _apply_dict(obj: Any, data: dict[str, Any]) -> None:
@@ -136,3 +165,18 @@ def load_config(path: str | Path | None = None) -> Config:
         _apply_dict(cfg, data)
     _apply_env_overrides(cfg)
     return cfg
+
+
+def load_strategy_configs(base_cfg: Config, path: str | Path | None = None) -> dict[str, Config]:
+    """Load config/strategies.yaml, applying each named strategy's overrides
+    on top of a deep copy of base_cfg."""
+    yaml_path = Path(path) if path else Path(__file__).resolve().parents[2] / "config" / "strategies.yaml"
+    with open(yaml_path, encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+
+    strategies: dict[str, Config] = {}
+    for name, overrides in data.get("strategies", {}).items():
+        cfg = copy.deepcopy(base_cfg)
+        _apply_dict(cfg, overrides or {})
+        strategies[name] = cfg
+    return strategies

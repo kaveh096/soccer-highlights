@@ -2,7 +2,14 @@ from datetime import datetime
 from pathlib import Path
 
 from soccer_highlights.discovery import Chunk
-from soccer_highlights.timeline import GlobalPeak, map_interval_to_chunks, merge_intervals, peaks_to_raw_intervals
+from soccer_highlights.timeline import (
+    GlobalPeak,
+    Interval,
+    invert_intervals,
+    map_interval_to_chunks,
+    merge_intervals,
+    peaks_to_raw_intervals,
+)
 
 
 def _chunk(sequence: int, global_start: float, duration: float) -> Chunk:
@@ -73,3 +80,31 @@ def test_map_interval_to_chunks_single_chunk_no_split():
 
     assert len(slices) == 1
     assert slices[0].chunk.sequence == 1
+
+
+def test_invert_intervals_finds_gaps_before_between_and_after():
+    covered = [Interval(start_seconds=50.0, end_seconds=100.0), Interval(start_seconds=150.0, end_seconds=180.0)]
+    negatives = invert_intervals(covered, total_duration=200.0, min_length=1.0, max_length=1000.0)
+
+    assert len(negatives) == 3
+    assert (negatives[0].start_seconds, negatives[0].end_seconds) == (0.0, 50.0)
+    assert (negatives[1].start_seconds, negatives[1].end_seconds) == (100.0, 150.0)
+    assert (negatives[2].start_seconds, negatives[2].end_seconds) == (180.0, 200.0)
+
+
+def test_invert_intervals_drops_short_gaps():
+    covered = [Interval(start_seconds=0.0, end_seconds=100.0), Interval(start_seconds=103.0, end_seconds=200.0)]
+    negatives = invert_intervals(covered, total_duration=200.0, min_length=5.0, max_length=1000.0)
+
+    assert negatives == []
+
+
+def test_invert_intervals_chunks_long_gaps():
+    covered: list[Interval] = []
+    negatives = invert_intervals(covered, total_duration=250.0, min_length=1.0, max_length=100.0)
+
+    assert len(negatives) == 3
+    total = sum(iv.end_seconds - iv.start_seconds for iv in negatives)
+    assert total == 250.0
+    for iv in negatives:
+        assert iv.end_seconds - iv.start_seconds <= 100.0 + 1e-9

@@ -1,10 +1,18 @@
 """CLI entry point.
 
-Two subcommands:
-  detect  - run audio peak detection only; writes events.json + a debug plot
-            for visually tuning thresholds before trusting the pipeline.
-  render  - run detection, then slice (or concat) the actual highlight clips
-            from the full-resolution source files.
+Subcommands:
+  detect        - run audio peak detection only; writes events.json + a
+                  debug plot for visually tuning thresholds.
+  render        - run detection, then slice (or concat) the actual
+                  highlight clips from the full-resolution source files.
+  batch-review  - run every named strategy from config/strategies.yaml,
+                  rendering small resized/downsampled review clips (from
+                  the .LRF proxy) per strategy, plus a whole-game skim and
+                  negative-space clips, for fast true/false-positive review.
+  review-sheet  - (re)generate a fillable review_sheet.csv per strategy
+                  (+ negatives) from an existing batch-review output.
+  score         - read back filled-in review_sheet.csv files and print
+                  precision/recall/F1 per strategy.
 """
 
 from __future__ import annotations
@@ -13,13 +21,21 @@ import argparse
 import tempfile
 from pathlib import Path
 
-from soccer_highlights import clipping
+from soccer_highlights import clipping, render
 from soccer_highlights.audio import extract_audio_samples
-from soccer_highlights.config import Config, load_config
+from soccer_highlights.config import Config, load_config, load_strategy_configs
 from soccer_highlights.detection import analyze
 from soccer_highlights.discovery import Chunk, discover_chunks
 from soccer_highlights.metadata import ChunkTrace, plot_debug, write_events_json
-from soccer_highlights.timeline import GlobalPeak, Interval, map_interval_to_chunks, merge_intervals, peaks_to_raw_intervals
+from soccer_highlights.scoring import format_score_report, generate_all_review_sheets, score_all
+from soccer_highlights.timeline import (
+    GlobalPeak,
+    Interval,
+    invert_intervals,
+    map_interval_to_chunks,
+    merge_intervals,
+    peaks_to_raw_intervals,
+)
 
 
 def _audio_source_path(chunk: Chunk, cfg: Config) -> Path:
@@ -51,9 +67,14 @@ def _run_detection(cfg: Config, chunks: list[Chunk]) -> tuple[list[Interval], li
             )
         )
 
-    raw_intervals = peaks_to_raw_intervals(all_peaks, cfg.timeline.lookback_seconds, cfg.timeline.post_peak_seconds)
+    warmed_up_peaks = [p for p in all_peaks if p.time_seconds >= cfg.timeline.warmup_seconds]
+    dropped = len(all_peaks) - len(warmed_up_peaks)
+    if dropped:
+        print(f"  (dropped {dropped} peak(s) within the {cfg.timeline.warmup_seconds}s warm-up period)")
+
+    raw_intervals = peaks_to_raw_intervals(warmed_up_peaks, cfg.timeline.lookback_seconds, cfg.timeline.post_peak_seconds)
     merged = merge_intervals(raw_intervals, cfg.timeline.min_gap_seconds, cfg.timeline.min_interval_seconds)
-    print(f"Merged into {len(merged)} highlight interval(s) from {len(all_peaks)} raw peak(s)")
+    print(f"Merged into {len(merged)} highlight interval(s) from {len(warmed_up_peaks)} raw peak(s)")
     return merged, traces
 
 
@@ -101,6 +122,70 @@ def cmd_render(cfg: Config) -> None:
     print("Done.")
 
 
+def cmd_batch_review(base_cfg: Config) -> None:
+    chunks = discover_chunks(base_cfg.input.source_dir)
+    strategy_configs = load_strategy_configs(base_cfg)
+    review_cfg = base_cfg.review
+
+    output_root = Path(review_cfg.output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    all_strategy_intervals: list[Interval] = []
+    with tempfile.TemporaryDirectory(prefix="soccer_hl_review_") as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+
+        for name, cfg in strategy_configs.items():
+            print(f"\n=== Strategy: {name} ===")
+            merged, traces = _run_detection(cfg, chunks)
+            all_strategy_intervals.extend(merged)
+
+            strategy_dir = output_root / name
+            strategy_dir.mkdir(parents=True, exist_ok=True)
+            write_events_json(merged, strategy_dir / "events.json")
+            plot_debug(traces, merged, strategy_dir / "debug_audio.png")
+
+            for i, interval in enumerate(merged):
+                slices = map_interval_to_chunks(interval, chunks)
+                clip_path = strategy_dir / f"clip_{i + 1:03d}.mp4"
+                print(f"  Rendering {clip_path.name} ({interval.end_seconds - interval.start_seconds:.1f}s)")
+                render.render_review_clip(slices, clip_path, tmp_dir, review_cfg)
+
+        print("\n=== Negative-space clips (no strategy fired) ===")
+        union = merge_intervals(all_strategy_intervals, min_gap_seconds=0.0, min_interval_seconds=0.0)
+        total_duration = sum(c.duration_seconds for c in chunks)
+        negatives = invert_intervals(
+            union, total_duration, review_cfg.min_negative_clip_seconds, review_cfg.max_negative_clip_seconds
+        )
+        negatives_dir = output_root / "negatives"
+        negatives_dir.mkdir(parents=True, exist_ok=True)
+        write_events_json(negatives, negatives_dir / "events.json")
+        for i, interval in enumerate(negatives):
+            slices = map_interval_to_chunks(interval, chunks)
+            clip_path = negatives_dir / f"clip_{i + 1:03d}.mp4"
+            print(f"  Rendering {clip_path.name} ({interval.end_seconds - interval.start_seconds:.1f}s)")
+            render.render_review_clip(slices, clip_path, tmp_dir, review_cfg)
+
+    print("\n=== Whole-game skim ===")
+    skim_path = output_root / "full_game_skim.mp4"
+    render.render_whole_game_skim(chunks, skim_path, review_cfg)
+    print(f"Wrote {skim_path}")
+
+    print("\nBatch review complete.")
+
+
+def cmd_review_sheet(cfg: Config) -> None:
+    output_root = Path(cfg.review.output_root)
+    sheets = generate_all_review_sheets(output_root)
+    for sheet_path in sheets:
+        print(f"Wrote {sheet_path}")
+
+
+def cmd_score(cfg: Config) -> None:
+    output_root = Path(cfg.review.output_root)
+    scores, ground_truth = score_all(output_root)
+    print(format_score_report(scores, ground_truth))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sunday Soccer Highlights Engine")
     parser.add_argument("--config", type=str, default=None, help="Path to a config YAML file (default: config/default.yaml)")
@@ -110,6 +195,9 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("detect", help="Detect peaks only; writes events.json + a debug plot")
     subparsers.add_parser("render", help="Detect peaks and produce highlight clips/reel")
+    subparsers.add_parser("batch-review", help="Run all named strategies, render small review clips + skim + negatives")
+    subparsers.add_parser("review-sheet", help="(Re)generate fillable review_sheet.csv files from batch-review output")
+    subparsers.add_parser("score", help="Compute precision/recall/F1 per strategy from filled-in review_sheet.csv files")
 
     args = parser.parse_args()
     cfg = load_config(args.config)
@@ -122,6 +210,12 @@ def main() -> None:
         cmd_detect(cfg)
     elif args.command == "render":
         cmd_render(cfg)
+    elif args.command == "batch-review":
+        cmd_batch_review(cfg)
+    elif args.command == "review-sheet":
+        cmd_review_sheet(cfg)
+    elif args.command == "score":
+        cmd_score(cfg)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ for slicing."""
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from soccer_highlights.discovery import Chunk
@@ -54,6 +55,36 @@ def merge_intervals(intervals: list[Interval], min_gap_seconds: float, min_inter
         else:
             merged.append(current)
     return [iv for iv in merged if iv.end_seconds - iv.start_seconds >= min_interval_seconds]
+
+
+def invert_intervals(
+    covered: list[Interval], total_duration: float, min_length: float, max_length: float
+) -> list[Interval]:
+    """Return the gaps NOT covered by any interval in `covered` (already
+    assumed merged/non-overlapping), chunked so no piece exceeds
+    max_length and pieces shorter than min_length are dropped."""
+    ordered = sorted(covered, key=lambda iv: iv.start_seconds)
+    gaps: list[tuple[float, float]] = []
+    cursor = 0.0
+    for iv in ordered:
+        if iv.start_seconds > cursor:
+            gaps.append((cursor, iv.start_seconds))
+        cursor = max(cursor, iv.end_seconds)
+    if cursor < total_duration:
+        gaps.append((cursor, total_duration))
+
+    negatives: list[Interval] = []
+    for start, end in gaps:
+        length = end - start
+        if length < min_length:
+            continue
+        n_chunks = max(1, math.ceil(length / max_length))
+        chunk_length = length / n_chunks
+        for i in range(n_chunks):
+            c_start = start + i * chunk_length
+            c_end = end if i == n_chunks - 1 else start + (i + 1) * chunk_length
+            negatives.append(Interval(start_seconds=c_start, end_seconds=c_end))
+    return negatives
 
 
 def map_interval_to_chunks(interval: Interval, chunks: list[Chunk]) -> list[ChunkSlice]:
