@@ -38,18 +38,20 @@ strategies:
         threshold_sigma: 3.0
         min_score_dbfs: 3.5
 
-  # Round 3 numbers: threshold_sigma=2.0, min_score swept in 0.01 steps
-  # against testdata/golden_events.json. min_score=0.55 is the largest
-  # value that still catches all 10 "must-catch" events (the only 3 misses
-  # across the whole 0.50-0.55 range are events the human reviewer's own
-  # notes marked "not very loud, ok to miss"); 0.56+ starts dropping
-  # must-catch events one at a time. This is also config/default.yaml's
-  # recommended default strategy.
+  # Round 3 numbers: min_score swept in 0.01 steps against
+  # testdata/golden_events.json at threshold_sigma=2.0. min_score=0.55 is
+  # the largest value that still catches all 10 "must-catch" events (the
+  # only 3 misses across the whole 0.50-0.55 range are events the human
+  # reviewer's own notes marked "not very loud, ok to miss"); 0.56+ starts
+  # dropping must-catch events one at a time. Round 4: threshold_sigma
+  # bumped 2.0->2.5, same recall with slightly better precision/fewer
+  # clips (3.0+ starts dropping a must-catch event). This is also
+  # config/default.yaml's recommended default strategy.
   strike_loose:
     detection:
       strategy: onset_flux
       onset_flux:
-        threshold_sigma: 2.0
+        threshold_sigma: 2.5
         min_score: 0.55
 
   # A tighter cut for fewer clips at the cost of one real (non-"ok to

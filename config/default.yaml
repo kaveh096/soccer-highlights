@@ -42,7 +42,10 @@ detection:
     window_seconds: 0.05
     hop_seconds: 0.01
     baseline_window_seconds: 30.0
-    threshold_sigma: 2.0
+    # Round 4: 2.5 gives the same 100% must-catch recall as 2.0 with
+    # slightly better precision and fewer clips; 3.0+ starts dropping a
+    # must-catch event (see strategies.yaml's strike_loose comment).
+    threshold_sigma: 2.5
     # Round 3: largest value that still catches all "must-catch" golden
     # events (see strategies.yaml's strike_loose comment for the full
     # rationale). This is the recommended default.

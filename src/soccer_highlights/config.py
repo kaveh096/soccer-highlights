@@ -48,7 +48,7 @@ class OnsetFluxConfig:
     window_seconds: float = 0.05
     hop_seconds: float = 0.01
     baseline_window_seconds: float = 30.0
-    threshold_sigma: float = 2.0
+    threshold_sigma: float = 2.5
     # Same purpose as RmsEnergyConfig.min_score_dbfs, but flux has no fixed
     # physical unit -- tune this relative to the flux magnitudes your own
     # recordings produce (check the debug plot). Round 3: largest value

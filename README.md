@@ -294,10 +294,29 @@ goals on the far side of the field) -- see the [Limitations](#limitations)
 note on what that distinction does and doesn't mean.
 
 `config/default.yaml` and `strike_loose` now default to
-`onset_flux`/`threshold_sigma=2.0`/`min_score=0.55`. `crowd_*`/`combo_*`
-were retuned too (best F1 found in the same sweep) but are kept as
-clearly inferior secondary options, not because they're worth using over
-`strike_loose` as-is.
+`onset_flux`/`min_score=0.55`. `crowd_*`/`combo_*` were retuned too (best
+F1 found in the same sweep) but are kept as clearly inferior secondary
+options, not because they're worth using over `strike_loose` as-is.
+
+## Round 4: plateau check
+
+One more pass to confirm round 3 wasn't a local optimum, both at
+`min_score=0.55`:
+
+- `threshold_sigma` sweep (1.0-4.0): 2.0-2.5 tie on must-catch recall;
+  2.5 edges out 2.0 on precision (0.32 vs 0.31) and clip count (31 vs 32)
+  for free, so that's the new default. 3.0+ starts dropping a must-catch
+  event -- confirms round 1's "sigma barely matters" finding still holds,
+  now to a decimal place instead of a shrug.
+- `min_interval_seconds` (3.0/5.0/8.0): zero effect -- every merged
+  interval at this operating point already clears even the 8s floor.
+
+No further gain available by turning these particular knobs -- this is
+the tuning plateau for a pure single-signal audio approach on this
+recording. Getting past it (e.g. reliably catching the 3 quiet, far-side
+goals without also catching a lot more background noise) would need a
+different kind of signal, not another threshold sweep -- see
+[specs.md](specs.md)'s planned Phase 2 vision refinement.
 
 ## Configuration reference
 
