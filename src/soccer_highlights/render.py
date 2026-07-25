@@ -9,7 +9,7 @@ import subprocess
 from pathlib import Path
 
 from soccer_highlights.clipping import concat_clips
-from soccer_highlights.config import ReviewConfig
+from soccer_highlights.config import ExportConfig, ReviewConfig
 from soccer_highlights.discovery import Chunk
 from soccer_highlights.timeline import ChunkSlice
 
@@ -25,7 +25,7 @@ def _run_ffmpeg(args: list[str]) -> None:
     subprocess.run(["ffmpeg", "-v", "error", "-y", *args], check=True)
 
 
-def _encode_piece(source_path: Path, start: float, duration: float, out_path: Path, cfg: ReviewConfig) -> None:
+def _encode_piece(source_path: Path, start: float, duration: float, out_path: Path, cfg: ReviewConfig | ExportConfig) -> None:
     _run_ffmpeg(
         [
             "-ss", f"{start:.3f}",
@@ -53,6 +53,27 @@ def render_review_clip(slices: list[ChunkSlice], out_path: Path, tmp_dir: Path, 
         source_path = cs.chunk.lrf_path or cs.chunk.mp4_path
         part_path = tmp_dir / f"{out_path.stem}_part{i}.mp4"
         _encode_piece(source_path, cs.local_start_seconds, cs.local_end_seconds - cs.local_start_seconds, part_path, cfg)
+        part_paths.append(part_path)
+
+    concat_clips(part_paths, out_path, force_reencode=False)
+    for part_path in part_paths:
+        part_path.unlink(missing_ok=True)
+
+
+def render_export_clip(slices: list[ChunkSlice], out_path: Path, tmp_dir: Path, cfg: ExportConfig) -> None:
+    """Render a (possibly chunk-boundary-spanning) interval as one
+    full-resolution, re-encoded delivery clip, always sourced from the
+    full-res .MP4 (never the .LRF proxy) -- unlike render_review_clip,
+    this is meant for sharing, not just fast true/false-positive review."""
+    if len(slices) == 1:
+        cs = slices[0]
+        _encode_piece(cs.chunk.mp4_path, cs.local_start_seconds, cs.local_end_seconds - cs.local_start_seconds, out_path, cfg)
+        return
+
+    part_paths: list[Path] = []
+    for i, cs in enumerate(slices):
+        part_path = tmp_dir / f"{out_path.stem}_part{i}.mp4"
+        _encode_piece(cs.chunk.mp4_path, cs.local_start_seconds, cs.local_end_seconds - cs.local_start_seconds, part_path, cfg)
         part_paths.append(part_path)
 
     concat_clips(part_paths, out_path, force_reencode=False)

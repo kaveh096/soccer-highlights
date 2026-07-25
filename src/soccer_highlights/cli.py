@@ -15,6 +15,10 @@ Subcommands:
                   per clip from time-overlap with a previous round's labels.
   score         - read back filled-in review_sheet.csv files and print
                   precision/recall/F1 per strategy.
+  export        - detect, then re-encode (not stream-copy) each highlight
+                  from the full-res source at export.* settings -- a
+                  compressed, widely-compatible copy for sharing (unlike
+                  render's lossless-but-huge stream-copy clips).
   golden-score  - score the current strategy/config against a pre-built
                   golden event set (golden.py), audio-only, no rendering
                   or human review needed. For re-checking tuning changes
@@ -194,6 +198,29 @@ def cmd_score(cfg: Config) -> None:
     print(format_score_report(scores, ground_truth))
 
 
+def cmd_export(cfg: Config, out_dir_override: str | None) -> None:
+    """Detect, then re-encode (not stream-copy) each highlight interval
+    from the full-res source at export.* settings -- a compressed,
+    widely-compatible delivery copy for sharing, as opposed to render's
+    lossless-but-huge stream-copy clips."""
+    chunks = discover_chunks(cfg.input.source_dir)
+    merged, _traces = _run_detection(cfg, chunks)
+
+    export_cfg = cfg.export
+    out_dir = Path(out_dir_override) if out_dir_override else Path(export_cfg.dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix="soccer_hl_export_") as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        for i, interval in enumerate(merged):
+            slices = map_interval_to_chunks(interval, chunks)
+            clip_path = out_dir / f"highlight_{i + 1:03d}.mp4"
+            print(f"Exporting {i + 1}/{len(merged)}: {clip_path.name} ({interval.end_seconds - interval.start_seconds:.1f}s)")
+            render.render_export_clip(slices, clip_path, tmp_dir, export_cfg)
+
+    print(f"\nExported {len(merged)} clip(s) to {out_dir}")
+
+
 def cmd_golden_score(cfg: Config, golden_path: str) -> None:
     """Score the current config's detection.strategy against a pre-built
     golden event set (see golden.py / testdata/golden_events.json) --
@@ -244,6 +271,12 @@ def main() -> None:
         "when given, each new clip gets a guess/guess_basis column from time-overlap with those labels",
     )
     subparsers.add_parser("score", help="Compute precision/recall/F1 per strategy from filled-in review_sheet.csv files")
+    export_parser = subparsers.add_parser(
+        "export", help="Detect, then re-encode each highlight from the full-res source at export.* settings (for sharing)"
+    )
+    export_parser.add_argument(
+        "--out-dir", type=str, default=None, help="Override export.dir (where the compressed highlight_NNN.mp4 files go)"
+    )
     golden_score_parser = subparsers.add_parser(
         "golden-score", help="Score the current --strategy/config against a pre-built golden event set (no rendering)"
     )
@@ -271,6 +304,8 @@ def main() -> None:
         cmd_review_sheet(cfg, args.prior_root)
     elif args.command == "score":
         cmd_score(cfg)
+    elif args.command == "export":
+        cmd_export(cfg, args.out_dir)
     elif args.command == "golden-score":
         cmd_golden_score(cfg, args.golden_events)
 

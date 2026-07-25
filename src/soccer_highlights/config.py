@@ -128,6 +128,27 @@ class ReviewConfig:
 
 
 @dataclass
+class ExportConfig:
+    # Full-resolution, re-encoded (not stream-copied) delivery clips for
+    # sharing -- source footage here is 4K at ~120fps HEVC Main10, which
+    # is far more than needed for sharing and is exactly the combination
+    # (high fps + 10-bit + HEVC) that struggles to play on modest hardware
+    # and takes forever to upload. Re-encoding to a lower, standard frame
+    # rate and 8-bit H.264 at a quality-targeted (not fixed) bitrate fixes
+    # both without a visible quality drop.
+    dir: str = "output/export"
+    max_width: int = 3840
+    fps: float = 30.0
+    # x264 CRF is a quality target, not a fixed bitrate -- output bitrate
+    # adapts per scene. 18 is the standard "visually lossless" reference
+    # value for x264.
+    crf: int = 18
+    preset: str = "medium"
+    threads: int = 0  # 0 = let ffmpeg use all available cores
+    audio_bitrate_kbps: int = 192
+
+
+@dataclass
 class Config:
     input: InputConfig = field(default_factory=InputConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
@@ -136,6 +157,7 @@ class Config:
     output: OutputConfig = field(default_factory=OutputConfig)
     metadata: MetadataConfig = field(default_factory=MetadataConfig)
     review: ReviewConfig = field(default_factory=ReviewConfig)
+    export: ExportConfig = field(default_factory=ExportConfig)
 
 
 def _apply_dict(obj: Any, data: dict[str, Any]) -> None:
