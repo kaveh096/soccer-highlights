@@ -17,8 +17,11 @@ audio:
   mono: true
 
 detection:
-  # Which strategy to use: "rms_energy" or "onset_flux"
-  strategy: "rms_energy"
+  # Which strategy to use: "rms_energy", "onset_flux", or "combined".
+  # Round 3 (see README) found onset_flux alone, tuned against real
+  # ground-truth timestamps (testdata/golden_events.json), beats
+  # rms_energy and combined fusion by a wide margin -- default to it.
+  strategy: "onset_flux"
 
   rms_energy:
     # Analysis window / hop size, in seconds, for the RMS-dB envelope.
@@ -32,18 +35,27 @@ detection:
     # regardless of how it compares to the local baseline (avoids flagging
     # peaks during silence/near-silence stretches).
     min_absolute_dbfs: -40.0
+    # Round 3: best F1 found in a golden-set sweep (see strategies.yaml).
+    min_score_dbfs: 3.5
 
   onset_flux:
     window_seconds: 0.05
     hop_seconds: 0.01
     baseline_window_seconds: 30.0
-    threshold_sigma: 2.5
+    threshold_sigma: 2.0
+    # Round 3: largest value that still catches all "must-catch" golden
+    # events (see strategies.yaml's strike_loose comment for the full
+    # rationale). This is the recommended default.
+    min_score: 0.55
 
 timeline:
-  # Seconds of context to keep before each detected peak.
-  lookback_seconds: 45.0
+  # Seconds of context to keep before each detected peak. Kept short and
+  # social-media-friendly (round 2): round 1 used a 45s lookback and human
+  # review found the interesting moment was routinely 30+ seconds into the
+  # clip -- too much dead air before the payoff.
+  lookback_seconds: 6.0
   # Seconds of context to keep after each detected peak.
-  post_peak_seconds: 8.0
+  post_peak_seconds: 5.0
   # Minimum silence gap (seconds) required between two intervals for them to
   # stay separate; anything closer gets merged into one continuous highlight.
   min_gap_seconds: 5.0
@@ -61,3 +73,16 @@ output:
 metadata:
   events_path: "output/events.json"
   debug_plot_path: "output/debug_audio.png"
+
+review:
+  output_root: "output/review"
+  # Round 2: C: drive now has plenty of free space, so quality is bumped up
+  # from round 1's overnight-safe 640x360/15fps/ultrafast settings.
+  max_width: 1280
+  fps: 30.0
+  crf: 23
+  preset: "veryfast"
+  threads: 4
+  audio_bitrate_kbps: 128
+  max_negative_clip_seconds: 120.0
+  min_negative_clip_seconds: 8.0

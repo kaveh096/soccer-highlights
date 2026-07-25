@@ -4,41 +4,86 @@
 #
 # Round 1: crowd_* (RMS-energy, reacts to crowd/cheer swells) and strike_*
 # (onset-flux, reacts to sharp transients like ball strikes) each split
-# into a loose/strict sensitivity variant.
+# into a loose/strict sensitivity variant. Numbers came from a threshold
+# sweep against score distributions of human-labeled clips.
 #
-# Numbers below came from a threshold sweep against the test recording
-# (see session notes), not a first guess: threshold_sigma turned out to
-# have almost no effect in the 2.0-4.0 range for either algorithm (the
-# rolling MAD is tiny relative to real peaks), so min_score/min_score_dbfs
-# is doing essentially all the discriminating work. Targets were chosen so
-# "loose" stays well short of covering the whole game (~30-40% of runtime)
-# while "strict" stays clearly selective (~10-15%). Expect to retune again
-# once human review flags true/false positives.
+# Round 2: combo_* -- AND-fusion of flux + a nearby corroborating rms
+# swell, on the theory that "impact sound + crowd reaction" beats either
+# signal's amplitude alone.
+#
+# Round 3: once every clip in round 2 was labeled with exact timestamps
+# for real events (see testdata/golden_events.json), every strategy could
+# be scored against real ground truth instead of amplitude-distribution
+# guesses -- and the previous rounds' assumptions didn't hold up. A plain
+# threshold sweep on onset_flux alone (see README's Round 3 results) beat
+# every rms_energy, combined-fusion, and union variant tried, by a wide
+# margin, once clip duration was accounted for (a duration-blind precision/
+# recall metric is gameable: a handful of multi-hundred-second blobs
+# "contains" nearly every event and looks like a perfect score while being
+# useless). strike_loose/strike_strict below are retuned on that basis;
+# crowd_*/combo_* are retuned too but kept as clearly inferior secondary
+# options, not the recommended default (see config/default.yaml).
 strategies:
   crowd_loose:
     detection:
       strategy: rms_energy
       rms_energy:
         threshold_sigma: 3.0
-        min_score_dbfs: 4.0
+        min_score_dbfs: 1.5
 
   crowd_strict:
     detection:
       strategy: rms_energy
       rms_energy:
-        threshold_sigma: 4.0
-        min_score_dbfs: 5.0
+        threshold_sigma: 3.0
+        min_score_dbfs: 3.5
 
+  # Round 3 numbers: threshold_sigma=2.0, min_score swept in 0.01 steps
+  # against testdata/golden_events.json. min_score=0.55 is the largest
+  # value that still catches all 10 "must-catch" events (the only 3 misses
+  # across the whole 0.50-0.55 range are events the human reviewer's own
+  # notes marked "not very loud, ok to miss"); 0.56+ starts dropping
+  # must-catch events one at a time. This is also config/default.yaml's
+  # recommended default strategy.
   strike_loose:
     detection:
       strategy: onset_flux
       onset_flux:
         threshold_sigma: 2.0
-        min_score: 0.65
+        min_score: 0.55
 
+  # A tighter cut for fewer clips at the cost of one real (non-"ok to
+  # miss") event: 26 clips instead of 32, ~12% of game runtime instead of
+  # ~15%, better precision (0.346 vs 0.312).
   strike_strict:
     detection:
       strategy: onset_flux
       onset_flux:
         threshold_sigma: 2.0
-        min_score: 0.85
+        min_score: 0.60
+
+  combo_loose:
+    detection:
+      strategy: combined
+      onset_flux:
+        threshold_sigma: 2.0
+        min_score: 0.30
+      rms_energy:
+        threshold_sigma: 3.0
+        min_score_dbfs: 3.0
+      combined:
+        window_before_seconds: 2.0
+        window_after_seconds: 20.0
+
+  combo_strict:
+    detection:
+      strategy: combined
+      onset_flux:
+        threshold_sigma: 2.0
+        min_score: 0.40
+      rms_energy:
+        threshold_sigma: 3.0
+        min_score_dbfs: 3.0
+      combined:
+        window_before_seconds: 2.0
+        window_after_seconds: 10.0

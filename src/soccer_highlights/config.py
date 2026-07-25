@@ -39,7 +39,8 @@ class RmsEnergyConfig:
     # near-zero-excess "events". Real acoustic events (cheers, strikes) clear
     # this by a wide margin, so this floor filters statistical noise without
     # touching genuine detections.
-    min_score_dbfs: float = 3.0
+    # Round 3: best F1 found in a golden-set sweep -- see config/strategies.yaml.
+    min_score_dbfs: float = 3.5
 
 
 @dataclass
@@ -47,24 +48,41 @@ class OnsetFluxConfig:
     window_seconds: float = 0.05
     hop_seconds: float = 0.01
     baseline_window_seconds: float = 30.0
-    threshold_sigma: float = 2.5
+    threshold_sigma: float = 2.0
     # Same purpose as RmsEnergyConfig.min_score_dbfs, but flux has no fixed
     # physical unit -- tune this relative to the flux magnitudes your own
-    # recordings produce (check the debug plot).
-    min_score: float = 0.0
+    # recordings produce (check the debug plot). Round 3: largest value
+    # that still catches every "must-catch" golden event -- see
+    # config/strategies.yaml's strike_loose comment.
+    min_score: float = 0.55
+
+
+@dataclass
+class CombinedConfig:
+    # An onset_flux transient only counts as a confirmed event if an
+    # rms_energy swell (crowd reaction) also fires within this window
+    # around it. Crowd reaction to real action typically lags the impact
+    # sound by a couple seconds, occasionally leads it slightly
+    # (anticipatory noise), rarely coincides exactly -- hence separate
+    # before/after tolerances rather than one symmetric window.
+    window_before_seconds: float = 2.0
+    window_after_seconds: float = 12.0
 
 
 @dataclass
 class DetectionConfig:
-    strategy: str = "rms_energy"
+    # Round 3: onset_flux alone beat rms_energy and combined fusion by a
+    # wide margin against real ground truth -- see README's Round 3 results.
+    strategy: str = "onset_flux"
     rms_energy: RmsEnergyConfig = field(default_factory=RmsEnergyConfig)
     onset_flux: OnsetFluxConfig = field(default_factory=OnsetFluxConfig)
+    combined: CombinedConfig = field(default_factory=CombinedConfig)
 
 
 @dataclass
 class TimelineConfig:
-    lookback_seconds: float = 45.0
-    post_peak_seconds: float = 8.0
+    lookback_seconds: float = 6.0
+    post_peak_seconds: float = 5.0
     min_gap_seconds: float = 5.0
     min_interval_seconds: float = 5.0
     # Ignore any peak before this point in the whole session -- camera
@@ -91,18 +109,18 @@ class ReviewConfig:
     # full-res source -- far cheaper to decode/re-encode, and plenty for
     # judging whether a detection was a true or false positive.
     output_root: str = "output/review"
-    max_width: int = 640
-    fps: float = 15.0
-    crf: int = 30
-    # "ultrafast" despite the name is the LIGHTEST x264 preset on the CPU
-    # (worse compression, more CPU time saved) -- picked deliberately after
-    # this machine crashed twice overnight under sustained encode load.
-    # Compression ratio doesn't matter for small low-res review clips.
-    preset: str = "ultrafast"
-    # Cap thread count so encoding doesn't pin every core at once; reduces
-    # sustained thermal/power load on an older laptop running unattended.
-    threads: int = 2
-    audio_bitrate_kbps: int = 64
+    # Round 1 used 640x360/15fps/ultrafast to fit an unattended overnight
+    # batch on tight disk space and avoid overloading the CPU (this machine
+    # crashed twice under sustained encode load). Round 2 clips are much
+    # shorter (social-media-length, not 45-135s) and disk space is no
+    # longer tight, so quality is bumped back up; `threads` stays capped
+    # rather than unbounded since this still isn't dedicated render hardware.
+    max_width: int = 1280
+    fps: float = 30.0
+    crf: int = 23
+    preset: str = "veryfast"
+    threads: int = 4
+    audio_bitrate_kbps: int = 128
     # Negative-space clips: gaps not covered by ANY strategy's candidate
     # intervals, chunked for review so nothing is silently missed.
     max_negative_clip_seconds: float = 120.0
