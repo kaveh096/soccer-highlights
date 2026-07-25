@@ -1,7 +1,7 @@
 import numpy as np
 
-from soccer_highlights.config import RmsEnergyConfig
-from soccer_highlights.detection import analyze_rms_energy
+from soccer_highlights.config import CombinedConfig, OnsetFluxConfig, RmsEnergyConfig
+from soccer_highlights.detection import PeakEvent, _confirm_by_proximity, analyze_combined, analyze_rms_energy
 
 
 def _signal_with_bursts(sample_rate: int, duration_seconds: float, burst_times: list[float]) -> np.ndarray:
@@ -53,6 +53,49 @@ def test_silence_produces_no_events():
     trace = analyze_rms_energy(samples, sample_rate, cfg)
 
     assert trace.events == []
+
+
+def test_confirm_by_proximity_keeps_only_corroborated_flux_events():
+    flux_events = [
+        PeakEvent(time_seconds=10.0, score=1.0),  # rms fires 3s after -> kept
+        PeakEvent(time_seconds=40.0, score=1.0),  # no nearby rms at all -> dropped
+        PeakEvent(time_seconds=70.0, score=1.0),  # rms fires 1s before -> kept
+    ]
+    rms_times = np.array([13.0, 69.0])
+
+    confirmed = _confirm_by_proximity(flux_events, rms_times, window_before_seconds=2.0, window_after_seconds=5.0)
+
+    assert sorted(e.time_seconds for e in confirmed) == [10.0, 70.0]
+
+
+def test_confirm_by_proximity_empty_rms_drops_everything():
+    flux_events = [PeakEvent(time_seconds=10.0, score=1.0)]
+    confirmed = _confirm_by_proximity(flux_events, np.array([]), window_before_seconds=2.0, window_after_seconds=5.0)
+    assert confirmed == []
+
+
+def test_analyze_combined_keeps_bursts_that_raise_both_signals():
+    sample_rate = 22050
+    # Each burst raises both rms and flux together (a real "shot" has both
+    # a transient and a sustained loudness rise) so all three survive
+    # corroboration; the drop-if-unconfirmed behavior itself is covered by
+    # test_confirm_by_proximity_keeps_only_corroborated_flux_events above.
+    samples = _signal_with_bursts(sample_rate, duration_seconds=90.0, burst_times=[10.0, 40.0, 70.0])
+
+    rms_cfg = RmsEnergyConfig(
+        window_seconds=0.2, hop_seconds=0.05, baseline_window_seconds=20.0, threshold_sigma=3.0,
+        min_absolute_dbfs=-60.0, min_score_dbfs=5.0,
+    )
+    flux_cfg = OnsetFluxConfig(
+        window_seconds=0.05, hop_seconds=0.01, baseline_window_seconds=20.0, threshold_sigma=2.0, min_score=1.0,
+    )
+    combined_cfg = CombinedConfig(window_before_seconds=2.0, window_after_seconds=5.0)
+
+    trace = analyze_combined(samples, sample_rate, rms_cfg, flux_cfg, combined_cfg)
+
+    assert len(trace.events) == 3
+    for expected, actual in zip([10.0, 40.0, 70.0], sorted(e.time_seconds for e in trace.events)):
+        assert abs(expected - actual) < 1.0
 
 
 def test_min_absolute_dbfs_floor_suppresses_quiet_local_maxima():

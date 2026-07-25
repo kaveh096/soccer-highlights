@@ -2,7 +2,7 @@ import csv
 import json
 from pathlib import Path
 
-from soccer_highlights.scoring import generate_all_review_sheets, generate_review_sheet, score_all
+from soccer_highlights.scoring import generate_all_review_sheets, generate_review_sheet, load_prior_labels, score_all
 
 
 def _write_events(dir_path: Path, intervals: list[tuple[float, float]]) -> None:
@@ -66,10 +66,10 @@ def test_score_all_computes_precision_recall_f1(tmp_path):
     generate_review_sheet(tmp_path / "crowd_strict")
     _write_sheet_verdicts(tmp_path / "crowd_strict" / "review_sheet.csv", ["TP"])
 
-    # negatives: one flagged MISS -- a third real event neither strategy found
+    # negatives: one flagged FN -- a third real event neither strategy found
     _write_events(tmp_path / "negatives", [(300.0, 310.0)])
     generate_review_sheet(tmp_path / "negatives")
-    _write_sheet_verdicts(tmp_path / "negatives" / "review_sheet.csv", ["MISS"])
+    _write_sheet_verdicts(tmp_path / "negatives" / "review_sheet.csv", ["FN"])
 
     scores, ground_truth = score_all(tmp_path)
 
@@ -81,13 +81,39 @@ def test_score_all_computes_precision_recall_f1(tmp_path):
     assert loose.true_positives == 2
     assert loose.false_positives == 1
     assert loose.precision == 2 / 3
-    assert loose.recall == 2 / 3  # found 2 of the 3 ground-truth events, missed the MISS-flagged one
+    assert loose.recall == 2 / 3  # found 2 of the 3 ground-truth events, missed the FN-flagged one
 
     strict = by_name["crowd_strict"]
     assert strict.true_positives == 1
     assert strict.false_positives == 0
     assert strict.precision == 1.0
     assert strict.recall == 1 / 3  # only overlaps the shared [0,10]-ish event
+
+
+def test_generate_review_sheet_with_prior_labels_guesses_verdicts(tmp_path):
+    prior_root = tmp_path / "round1"
+    _write_events(prior_root / "crowd_loose", [(0.0, 10.0), (100.0, 110.0)])
+    generate_review_sheet(prior_root / "crowd_loose")
+    _write_sheet_verdicts(prior_root / "crowd_loose" / "review_sheet.csv", ["TP", "FP"])
+    _write_events(prior_root / "negatives", [(200.0, 210.0)])
+    generate_review_sheet(prior_root / "negatives")
+    _write_sheet_verdicts(prior_root / "negatives" / "review_sheet.csv", ["FN"])
+    prior_labels = load_prior_labels(prior_root)
+    assert len(prior_labels) == 3
+
+    round2_dir = tmp_path / "round2" / "combo_loose"
+    # overlaps the round-1 TP -> guess TP; overlaps the round-1 FP -> guess FP;
+    # overlaps the round-1 FN negative -> guess TP; no overlap at all -> blank guess
+    _write_events(round2_dir, [(2.0, 8.0), (101.0, 109.0), (202.0, 208.0), (500.0, 510.0)])
+    sheet_path = generate_review_sheet(round2_dir, prior_labels)
+
+    with open(sheet_path, encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+
+    assert [r["guess"] for r in rows] == ["TP", "FP", "TP", ""]
+    assert rows[0]["verdict"] == ""  # guessing never fills in the real verdict column
+    assert "crowd_loose/clip_001.mp4=TP" in rows[0]["guess_basis"]
+    assert rows[3]["guess_basis"] == "no overlapping prior label"
 
 
 def test_score_all_unlabeled_clips_excluded_from_precision(tmp_path):

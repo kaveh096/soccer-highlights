@@ -6,14 +6,14 @@ Workflow:
      strategy (+ one for negatives) next to that strategy's clips.
   2. Watch the clips, fill in the `verdict` column:
        - strategy sheets: TP (real shot-on-target) or FP (not one)
-       - negatives sheet: MISS (a real event fell in this uncovered gap)
-         or leave blank (nothing there)
+       - negatives sheet: FN (a real event fell in this uncovered gap) or
+         TN (correctly nothing there)
   3. Run `score` to compute precision/recall/F1 per strategy. Ground truth
      is defined as the union of every clip marked TP across every
-     strategy (merged when overlapping), plus each MISS-marked negative
-     gap -- so recall is relative to everything found across the whole
-     batch, not an independent ground truth (see session notes on why
-     that's a limitation, not just a simplification).
+     strategy (merged when overlapping), plus each FN-marked negative gap
+     -- so recall is relative to everything found across the whole batch,
+     not an independent ground truth (see session notes on why that's a
+     limitation, not just a simplification).
 """
 
 from __future__ import annotations
@@ -26,7 +26,9 @@ from pathlib import Path
 from soccer_highlights.timeline import Interval, merge_intervals
 
 STRATEGY_VERDICTS = {"TP", "FP"}
-NEGATIVE_VERDICTS = {"MISS"}
+NEGATIVE_VERDICTS = {"FN"}
+ALL_VERDICTS = {"TP", "FP", "TN", "FN"}
+INTERESTING_VERDICTS = {"TP", "FN"}  # verdicts confirming a real event was present
 
 
 def _read_events(events_path: Path) -> list[dict]:
@@ -34,43 +36,107 @@ def _read_events(events_path: Path) -> list[dict]:
         return json.load(f)
 
 
-def generate_review_sheet(strategy_dir: Path) -> Path:
+def _read_sheet(sheet_path: Path) -> list[dict]:
+    with open(sheet_path, encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+@dataclass
+class PriorLabel:
+    interval: Interval
+    verdict: str  # one of ALL_VERDICTS
+    notes: str
+    source: str  # e.g. "crowd_loose/clip_004.mp4"
+
+
+def load_prior_labels(prior_root: Path) -> list[PriorLabel]:
+    """Read every labeled clip (TP/FP/TN/FN) out of a previous round's
+    review_root, for use as a time-overlap basis to guess verdicts on a
+    freshly re-run batch."""
+    labels: list[PriorLabel] = []
+    for sub in sorted(prior_root.iterdir()):
+        sheet_path = sub / "review_sheet.csv"
+        if not sub.is_dir() or not sheet_path.exists():
+            continue
+        for row in _read_sheet(sheet_path):
+            verdict = row["verdict"].strip().upper()
+            if verdict not in ALL_VERDICTS:
+                continue
+            labels.append(
+                PriorLabel(
+                    interval=Interval(
+                        start_seconds=float(row["start_seconds"]), end_seconds=float(row["end_seconds"])
+                    ),
+                    verdict=verdict,
+                    notes=row.get("notes", "").strip(),
+                    source=f"{sub.name}/{row['clip_file']}",
+                )
+            )
+    return labels
+
+
+def _guess_verdict(interval: Interval, prior_labels: list[PriorLabel]) -> tuple[str, str]:
+    """Guess TP/FP for a new interval from time-overlapping prior labels.
+    Returns (guess, basis) -- guess is "" if there's nothing to go on, or
+    "AMBIGUOUS" if overlapping prior labels disagree on whether something
+    interesting was there."""
+    overlapping = [p for p in prior_labels if _overlaps(interval, p.interval)]
+    if not overlapping:
+        return "", "no overlapping prior label"
+
+    classes = {p.verdict in INTERESTING_VERDICTS for p in overlapping}
+    basis = "; ".join(f"{p.source}={p.verdict}" + (f" ({p.notes})" if p.notes else "") for p in overlapping)
+
+    if classes == {True}:
+        return "TP", basis
+    if classes == {False}:
+        return "FP", basis
+    return "AMBIGUOUS", basis
+
+
+def generate_review_sheet(strategy_dir: Path, prior_labels: list[PriorLabel] | None = None) -> Path:
     """Build (or overwrite) a fillable review_sheet.csv for one strategy
-    (or the negatives) directory, from its events.json + clip_NNN.mp4 files."""
+    (or the negatives) directory, from its events.json + clip_NNN.mp4 files.
+
+    If `prior_labels` is given (from a previous round's `load_prior_labels`),
+    each row also gets a `guess`/`guess_basis` column: a best-effort TP/FP
+    prediction from time-overlap with the old labels, for the human to
+    verify rather than re-label from scratch. This never touches the
+    `verdict` column itself -- that stays blank until a human confirms it."""
     events = _read_events(strategy_dir / "events.json")
     sheet_path = strategy_dir / "review_sheet.csv"
     with open(sheet_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(
-            ["clip_file", "start_seconds", "end_seconds", "duration_seconds", "max_peak_score", "verdict", "notes"]
-        )
+        header = ["clip_file", "start_seconds", "end_seconds", "duration_seconds", "max_peak_score", "verdict", "notes"]
+        if prior_labels is not None:
+            header += ["guess", "guess_basis"]
+        writer.writerow(header)
         for i, event in enumerate(events, start=1):
             max_score = max((p["score"] for p in event.get("peaks", [])), default=0.0)
-            writer.writerow(
-                [
-                    f"clip_{i:03d}.mp4",
-                    event["start_seconds"],
-                    event["end_seconds"],
-                    event["duration_seconds"],
-                    round(max_score, 4),
-                    "",
-                    "",
-                ]
-            )
+            row = [
+                f"clip_{i:03d}.mp4",
+                event["start_seconds"],
+                event["end_seconds"],
+                event["duration_seconds"],
+                round(max_score, 4),
+                "",
+                "",
+            ]
+            if prior_labels is not None:
+                interval = Interval(start_seconds=event["start_seconds"], end_seconds=event["end_seconds"])
+                guess, basis = _guess_verdict(interval, prior_labels)
+                row += [guess, basis]
+            writer.writerow(row)
     return sheet_path
 
 
-def generate_all_review_sheets(review_root: Path) -> list[Path]:
+def generate_all_review_sheets(review_root: Path, prior_root: Path | None = None) -> list[Path]:
+    prior_labels = load_prior_labels(prior_root) if prior_root is not None else None
     sheets = []
     for sub in sorted(review_root.iterdir()):
         if sub.is_dir() and (sub / "events.json").exists():
-            sheets.append(generate_review_sheet(sub))
+            sheets.append(generate_review_sheet(sub, prior_labels))
     return sheets
-
-
-def _read_sheet(sheet_path: Path) -> list[dict]:
-    with open(sheet_path, encoding="utf-8") as f:
-        return list(csv.DictReader(f))
 
 
 @dataclass
@@ -165,7 +231,7 @@ def score_all(review_root: Path) -> tuple[list[StrategyScore], list[Interval]]:
 
 
 def format_score_report(scores: list[StrategyScore], ground_truth: list[Interval]) -> str:
-    lines = [f"Ground truth events (union of all TP + MISS-flagged negatives): {len(ground_truth)}", ""]
+    lines = [f"Ground truth events (union of all TP + FN-flagged negatives): {len(ground_truth)}", ""]
     header = f"{'strategy':<16}{'labeled/total':<16}{'TP':<6}{'FP':<6}{'precision':<12}{'recall':<12}{'F1':<8}"
     lines.append(header)
     lines.append("-" * len(header))

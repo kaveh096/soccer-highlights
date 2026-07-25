@@ -16,7 +16,7 @@ import numpy as np
 from scipy import signal
 from scipy.ndimage import median_filter
 
-from soccer_highlights.config import DetectionConfig, OnsetFluxConfig, RmsEnergyConfig
+from soccer_highlights.config import CombinedConfig, DetectionConfig, OnsetFluxConfig, RmsEnergyConfig
 
 _MAD_TO_STD = 1.4826  # scale factor making MAD a consistent estimator of std for normal-ish data
 _EPS = 1e-10
@@ -127,9 +127,54 @@ def analyze_onset_flux(samples: np.ndarray, sample_rate: int, cfg: OnsetFluxConf
     return DetectionTrace(times=times, values=flux, threshold=threshold, value_label="spectral flux", events=events)
 
 
+def _confirm_by_proximity(
+    flux_events: list[PeakEvent], rms_times: np.ndarray, window_before_seconds: float, window_after_seconds: float
+) -> list[PeakEvent]:
+    """Keep only flux_events that have an rms peak time within
+    [event.time - window_before_seconds, event.time + window_after_seconds]."""
+    if rms_times.size == 0:
+        return []
+    return [
+        event
+        for event in flux_events
+        if np.any(
+            (rms_times >= event.time_seconds - window_before_seconds)
+            & (rms_times <= event.time_seconds + window_after_seconds)
+        )
+    ]
+
+
+def analyze_combined(samples: np.ndarray, sample_rate: int, rms_cfg: RmsEnergyConfig, flux_cfg: OnsetFluxConfig, combined_cfg: CombinedConfig) -> DetectionTrace:
+    """Keep only onset_flux transients corroborated by a nearby rms_energy
+    swell. Encodes "shot on target" directly (impact sound + crowd
+    reaction) instead of trusting either signal's amplitude alone -- each
+    has its own common false-positive mode: flux fires on any
+    footstep/contact, rms fires on any sustained crowd noise including
+    chatter/practice shots during a break. Requiring both cuts either
+    signal's independent false positives without a stricter amplitude
+    threshold (which round-1 scoring showed doesn't cleanly separate
+    TP from FP on either signal alone)."""
+    flux_trace = analyze_onset_flux(samples, sample_rate, flux_cfg)
+    rms_trace = analyze_rms_energy(samples, sample_rate, rms_cfg)
+    rms_times = np.array([e.time_seconds for e in rms_trace.events])
+    confirmed = _confirm_by_proximity(
+        flux_trace.events, rms_times, combined_cfg.window_before_seconds, combined_cfg.window_after_seconds
+    )
+
+    return DetectionTrace(
+        times=flux_trace.times,
+        values=flux_trace.values,
+        threshold=flux_trace.threshold,
+        value_label="spectral flux (crowd-confirmed)",
+        events=confirmed,
+    )
+
+
 def analyze(samples: np.ndarray, sample_rate: int, strategy: str, cfg: DetectionConfig) -> DetectionTrace:
     if strategy == "rms_energy":
         return analyze_rms_energy(samples, sample_rate, cfg.rms_energy)
     if strategy == "onset_flux":
         return analyze_onset_flux(samples, sample_rate, cfg.onset_flux)
+    if strategy == "combined":
+        return analyze_combined(samples, sample_rate, cfg.rms_energy, cfg.onset_flux, cfg.combined)
     raise ValueError(f"Unknown detection strategy: {strategy!r}")
