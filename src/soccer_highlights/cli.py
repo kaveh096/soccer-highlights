@@ -23,20 +23,24 @@ Subcommands:
                   golden event set (golden.py), audio-only, no rendering
                   or human review needed. For re-checking tuning changes
                   once a golden set exists (see testdata/README.md).
+                  With --vision, also runs the Phase 2 vision refinement
+                  pass (vision.py) and prints its score alongside the
+                  audio-only one.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import tempfile
 from pathlib import Path
 
-from soccer_highlights import clipping, render
+from soccer_highlights import clipping, render, vision
 from soccer_highlights.audio import extract_audio_samples
 from soccer_highlights.config import Config, load_config, load_strategy_configs
 from soccer_highlights.detection import analyze
 from soccer_highlights.discovery import Chunk, discover_chunks
-from soccer_highlights.golden import load_golden_events, score_intervals_against_golden
+from soccer_highlights.golden import GoldenScore, load_golden_events, score_intervals_against_golden
 from soccer_highlights.metadata import ChunkTrace, plot_debug, write_events_json
 from soccer_highlights.scoring import format_score_report, generate_all_review_sheets, score_all
 from soccer_highlights.timeline import (
@@ -221,11 +225,26 @@ def cmd_export(cfg: Config, out_dir_override: str | None) -> None:
     print(f"\nExported {len(merged)} clip(s) to {out_dir}")
 
 
-def cmd_golden_score(cfg: Config, golden_path: str) -> None:
+def _print_golden_score(score: GoldenScore, game_duration: float) -> None:
+    pct = 100 * score.total_duration_seconds / game_duration if game_duration else 0.0
+    mean_dur = f"{score.mean_clip_duration_seconds:.1f}s" if score.mean_clip_duration_seconds is not None else "n/a"
+    print(f"clips={score.total_clips}  TP={score.true_positives}  FP={score.false_positives}  FN={score.false_negatives}")
+    print(f"precision={score.precision}  recall={score.recall}  F1={score.f1}")
+    print(f"mean_clip_duration={mean_dur}  max_clip_duration={score.max_clip_duration_seconds:.1f}s  "
+          f"total_duration={score.total_duration_seconds:.1f}s ({pct:.1f}% of game)")
+
+
+def cmd_golden_score(cfg: Config, golden_path: str, use_vision: bool) -> None:
     """Score the current config's detection.strategy against a pre-built
     golden event set (see golden.py / testdata/golden_events.json) --
     audio-only, no clip rendering or human review needed. Useful for
-    quickly re-checking a tuning change against known ground truth."""
+    quickly re-checking a tuning change against known ground truth.
+
+    With --vision, also runs the Phase 2 vision refinement pass (see
+    vision.py) over the audio-only intervals and prints its score
+    alongside the audio-only one, so the delta is directly visible --
+    this is the go/no-go check for whether vision actually helps, not
+    just a different number to eyeball on its own."""
     chunks = discover_chunks(cfg.input.source_dir)
     samples_by_chunk = []
     for chunk in chunks:
@@ -237,15 +256,30 @@ def cmd_golden_score(cfg: Config, golden_path: str) -> None:
     golden_events = load_golden_events(Path(golden_path))
     intervals = detect_intervals(samples_by_chunk, cfg.audio.sample_rate, cfg.detection.strategy, cfg.detection, cfg.timeline)
     game_duration = sum(c.duration_seconds for c in chunks)
-    score = score_intervals_against_golden(intervals, golden_events)
+    audio_score = score_intervals_against_golden(intervals, golden_events)
 
-    pct = 100 * score.total_duration_seconds / game_duration if game_duration else 0.0
-    mean_dur = f"{score.mean_clip_duration_seconds:.1f}s" if score.mean_clip_duration_seconds is not None else "n/a"
     print(f"\nstrategy={cfg.detection.strategy}  golden_events={len(golden_events)}")
-    print(f"clips={score.total_clips}  TP={score.true_positives}  FP={score.false_positives}  FN={score.false_negatives}")
-    print(f"precision={score.precision}  recall={score.recall}  F1={score.f1}")
-    print(f"mean_clip_duration={mean_dur}  max_clip_duration={score.max_clip_duration_seconds:.1f}s  "
-          f"total_duration={score.total_duration_seconds:.1f}s ({pct:.1f}% of game)")
+    print("--- audio-only ---")
+    _print_golden_score(audio_score, game_duration)
+
+    if not use_vision:
+        return
+
+    if not os.environ.get(cfg.vision.api_key_env):
+        raise SystemExit(
+            f"--vision requires {cfg.vision.api_key_env} to be set (see README's Vision AI section for setup)."
+        )
+
+    print("\nRunning vision refinement pass (calls the Claude API for every candidate window and gap)...")
+    refined, vision_log = vision.refine_with_vision(intervals, chunks, game_duration, cfg.timeline, cfg.vision)
+    vision_score = score_intervals_against_golden(refined, golden_events)
+
+    print("\n--- vision-refined ---")
+    _print_golden_score(vision_score, game_duration)
+
+    vision_log_path = Path(cfg.metadata.events_path).parent / "vision_events.json"
+    vision.save_vision_log(vision_log, vision_log_path)
+    print(f"\nWrote vision verdict log to {vision_log_path}")
 
 
 def main() -> None:
@@ -286,6 +320,12 @@ def main() -> None:
         default="testdata/golden_events.json",
         help="Path to a golden_events.json (default: testdata/golden_events.json)",
     )
+    golden_score_parser.add_argument(
+        "--vision",
+        action="store_true",
+        help="Also run the Phase 2 vision refinement pass and print its score alongside the audio-only one "
+        "(calls the Claude API; requires vision.api_key_env, default ANTHROPIC_API_KEY, to be set)",
+    )
 
     args = parser.parse_args()
     cfg = load_config(args.config)
@@ -307,7 +347,7 @@ def main() -> None:
     elif args.command == "export":
         cmd_export(cfg, args.out_dir)
     elif args.command == "golden-score":
-        cmd_golden_score(cfg, args.golden_events)
+        cmd_golden_score(cfg, args.golden_events, args.vision)
 
 
 if __name__ == "__main__":

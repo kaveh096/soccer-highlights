@@ -149,6 +149,32 @@ class ExportConfig:
 
 
 @dataclass
+class VisionConfig:
+    # Phase 2: off by default -- audio-only behavior is unchanged unless a
+    # caller explicitly opts in (see cli.py's `golden-score --vision`).
+    enabled: bool = False
+    model: str = "claude-sonnet-5"
+    api_key_env: str = "ANTHROPIC_API_KEY"
+    frames_per_window: int = 5
+    # Frames are always pulled from the .LRF proxy, never the full-res
+    # source -- same reasoning as audio detection: cheap, fast to decode
+    # on old hardware, and plenty of detail for a classification call.
+    frame_max_width: int = 640
+    # Confirm pass: an audio-flagged interval is only DROPPED if vision
+    # reports a false positive at or above this confidence. Recall-first
+    # per the project's standing priority -- an uncertain or errored call
+    # keeps the interval rather than discarding a possibly-real event.
+    drop_confidence_threshold: float = 0.75
+    # Scan pass: a negative-space gap only gets a new synthesized interval
+    # if vision reports an event at or above this confidence.
+    add_confidence_threshold: float = 0.75
+    scan_chunk_max_seconds: float = 120.0
+    scan_chunk_min_seconds: float = 8.0
+    request_timeout_seconds: float = 60.0
+    max_retries: int = 2
+
+
+@dataclass
 class Config:
     input: InputConfig = field(default_factory=InputConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
@@ -158,6 +184,7 @@ class Config:
     metadata: MetadataConfig = field(default_factory=MetadataConfig)
     review: ReviewConfig = field(default_factory=ReviewConfig)
     export: ExportConfig = field(default_factory=ExportConfig)
+    vision: VisionConfig = field(default_factory=VisionConfig)
 
 
 def _apply_dict(obj: Any, data: dict[str, Any]) -> None:

@@ -160,14 +160,22 @@ negative gap. A strategy's recall is how much of that union its own `TP`
 clips overlap. See [Limitations](#limitations) -- this is relative to what
 the whole batch found, not an independent ground truth.
 
-**`golden-score [--golden-events PATH]`** -- scores the *current*
-`--strategy`/config against a pre-built golden event set (exact
+**`golden-score [--golden-events PATH] [--vision]`** -- scores the
+*current* `--strategy`/config against a pre-built golden event set (exact
 ground-truth timestamps, see [golden.py](#round-3-results)) instead of a
 labeled batch-review round: audio-only, no clip rendering, no human
 review, just `detect` + compare against known timestamps. Default path is
 `testdata/golden_events.json`. Once a golden set exists for a recording,
 this is the fast path for re-checking any tuning change -- see
 [tuning.py](src/soccer_highlights/tuning.py).
+
+With `--vision`, also runs the Phase 2 vision refinement pass (see
+[Vision AI (Phase 2)](#vision-ai-phase-2)) over the audio-only intervals
+and prints its score alongside the audio-only one, so the two are
+directly comparable -- the go/no-go check for whether vision actually
+helps. Requires `vision.api_key_env` (default `ANTHROPIC_API_KEY`) to be
+set; calls the Claude API once per candidate window/gap, so unlike every
+other `golden-score` use it isn't free or instant.
 
 ## Detection strategies
 
@@ -317,6 +325,65 @@ recording. Getting past it (e.g. reliably catching the 3 quiet, far-side
 goals without also catching a lot more background noise) would need a
 different kind of signal, not another threshold sweep -- see
 [specs.md](specs.md)'s planned Phase 2 vision refinement.
+
+## Vision AI (Phase 2)
+
+Groundwork for the vision refinement specs.md's Phase 2 named, layered on
+top of the audio pipeline rather than replacing it. Targets the two
+confirmed, human-labeled audio failure modes from Round 3/4 directly
+(see [Limitations](#limitations)): practice shots / crowd chatter during
+breaks that sound like real action, and quiet far-side goals that never
+clear an audio threshold. Both are visually obvious even when barely
+audible, which audio-only detection structurally can't use.
+
+Provider is **Claude's vision API** (`anthropic` package) -- not the
+Google Video Intelligence / AWS Rekognition / GPT-4o options specs.md
+named. Google's shot/object/label detection doesn't answer "shot on
+target vs. practice shot" (that's not a label it produces); AWS
+Rekognition has no built-in "kicking"/"goal celebration" action class and
+would need a custom-trained model. Both also need async job/bucket
+plumbing (upload to cloud storage, poll an operation) this repo doesn't
+have. A direct vision-LLM prompt answers the actual semantic question in
+one synchronous call per candidate window/gap -- fits the existing
+"small script calls ffmpeg, does one thing" shape directly, and frames
+are always pulled from the `.LRF` proxy (never the full-res source), same
+reasoning as audio detection on this hardware.
+
+[`vision.py`](src/soccer_highlights/vision.py) runs two passes, both
+built on the same `Interval`/`GlobalPeak` primitives
+[`timeline.py`](src/soccer_highlights/timeline.py) already provides:
+
+- **Confirm**: for every audio-flagged interval, sample
+  `vision.frames_per_window` frames evenly across it and ask whether they
+  show real in-play action or a false-positive-shaped moment (practice
+  shot, break-time chatter). An interval is only *dropped* on a
+  false-positive verdict at or above `vision.drop_confidence_threshold`
+  -- recall-first, matching this project's standing tuning priority: an
+  uncertain or errored vision call keeps the interval rather than risk
+  discarding a real event.
+- **Scan**: for every gap no audio strategy flagged (`invert_intervals`,
+  same negative-space chunking `batch-review` already uses), sample
+  frames across it and ask whether a real event is visible anyway. A new
+  interval is only *added* on an event verdict at or above
+  `vision.add_confidence_threshold`, windowed with the same
+  `timeline.lookback_seconds`/`post_peak_seconds` a real audio peak
+  would get.
+
+Both passes return per-window verdicts (`VisionRunLog`) written to
+`vision_events.json` for spot-checking against real clips -- the same
+role `metadata.events_path` plays for audio.
+
+**Status**: implemented and unit-tested (pure decision logic only --
+`_evenly_spaced_offsets`, `_parse_verdict_json`, `decide_confirm`,
+`decide_scan`, `refine_with_vision`'s merge step, all against
+injected/fake verdicts, no real API or ffmpeg calls in `pytest`, same
+split as `audio.py`/`clipping.py`/`render.py`). **Not yet validated
+against real footage or wired into `render`/`export`/`batch-review`** --
+no `ANTHROPIC_API_KEY` has been set up yet. Once one exists, run
+`soccer-highlights golden-score --vision` against
+`testdata/golden_events.json` and compare its audio-only vs.
+vision-refined scores; results will be written up here the same way
+Round 1/3/4 were, after actually running it -- not speculated in advance.
 
 ## Configuration reference
 
