@@ -543,6 +543,53 @@ classifier") would be the next thing worth trying, not another prompt
 tweak in this family. This round stopped here deliberately rather than
 iterate further -- see git log.
 
+### Label audit: is the ground truth itself the bottleneck?
+
+Every round above measured against `testdata/golden_events.json`, which
+is itself derived from the Round 2 human-labeled dataset
+(`output/review/*`) via `golden.build_golden_events()` -- a fairly rough
+process (a TP's anchor time is just its strongest detected peak; most
+labeled rows have no descriptive note at all, just a bare verdict
+letter). Three straight rounds of prompt tuning failing to clearly beat
+audio alone raised an obvious question: is the AI the bottleneck, or are
+we tuning hard against imprecise labels?
+
+[`label_audit.py`](src/soccer_highlights/label_audit.py) checks this
+directly, without touching detection at all: for every already-labeled
+row across all of `output/review`'s sheets (strategy TP/FP clips +
+negative-space TN/FN gaps -- 96 rows total), Gemini watches the clip
+fresh (no verdict/notes shown to it) and writes a free-text scene
+description -- deliberately not a yes/no+confidence judgment, since
+that exact shape regressed three times in a row above. Claude then
+judges, from the human's verdict+notes and Gemini's description alone,
+whether they agree (`consistent` / `human_likely_wrong` /
+`ai_likely_wrong` / `ambiguous`, plus a 0-1 distance score). Rows the
+judge flags get an ultrafast/960px clip rendered for a human to actually
+watch, and every row -- flagged or not -- lands in one CSV
+(`label_audit_report.csv`) with the original label, the Gemini
+description, the judge's verdict, and two blank columns (`new_label`,
+`new_notes`) to record a revised label after watching.
+
+Run via `soccer-highlights label-audit [--limit N]` (the `--limit` flag
+exists specifically to smoke-test cheaply before committing to the full,
+multi-hour, real-API-cost run). Resumable by design -- results cache to
+`output/label_audit/audit_cache.json` incrementally, and a row with a
+cached description but no judge only retries the missing judge call,
+not both (this run needed it twice: interrupted first by the laptop
+going to sleep, then again by an unrelated overnight app closure --
+both times it picked up exactly where it left off with zero lost API
+spend).
+
+**First real run** (2026-07-26, 96 rows): 76 consistent, 15
+`ai_likely_wrong`, 5 `human_likely_wrong`. That ~21% flagged rate is
+itself informative -- it's roughly the same order of magnitude as the
+F1 gap every detection round above was fighting over, suggesting the
+golden set's own noise floor may be a real contributor to why three
+rounds of prompt tuning couldn't clearly move the needle. Human review
+of the flagged clips (via the delivered CSV + `flagged_clips/`) is the
+next step -- this tool surfaces disagreements for a person to adjudicate,
+it does not relabel anything itself.
+
 ## Configuration reference
 
 `config/default.yaml`:

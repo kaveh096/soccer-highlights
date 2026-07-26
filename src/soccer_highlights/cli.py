@@ -47,6 +47,17 @@ Subcommands:
                   set. Pure measurement, no rendering -- for comparing
                   providers/prompts/frame-density settings on the exact
                   same candidate set. See README's Vision AI section.
+  label-audit   - audits the existing human-labeled Round 2 dataset
+                  (output/review/*) instead of tuning detection further:
+                  Gemini writes a free-text scene description of every
+                  already-labeled clip (no verdict shown to it), Claude
+                  judges whether that description agrees with the
+                  original human verdict/notes. Renders ultrafast/1K
+                  clips only for flagged (disagreeing) rows, and writes
+                  a CSV with every row -- original label, Gemini
+                  description, judge verdict, and two blank columns for
+                  you to fill in a revised label/notes. See
+                  label_audit.py and README's Vision AI section.
 """
 
 from __future__ import annotations
@@ -56,9 +67,9 @@ import os
 import tempfile
 from pathlib import Path
 
-from soccer_highlights import clipping, render, vision, vision_eval, vision_gemini
+from soccer_highlights import clipping, label_audit, render, vision, vision_eval, vision_gemini
 from soccer_highlights.audio import extract_audio_samples
-from soccer_highlights.config import Config, load_config, load_strategy_configs
+from soccer_highlights.config import Config, ReviewConfig, load_config, load_strategy_configs
 from soccer_highlights.detection import analyze
 from soccer_highlights.discovery import Chunk, discover_chunks
 from soccer_highlights.golden import GoldenScore, load_golden_events, score_intervals_against_golden
@@ -237,12 +248,18 @@ def cmd_export(cfg: Config, out_dir_override: str | None) -> None:
 
     with tempfile.TemporaryDirectory(prefix="soccer_hl_export_") as tmp_dir_str:
         tmp_dir = Path(tmp_dir_str)
+        skipped = 0
         for i, interval in enumerate(merged):
-            slices = map_interval_to_chunks(interval, chunks)
             clip_path = out_dir / f"highlight_{i + 1:03d}.mp4"
+            if clip_path.exists() and clip_path.stat().st_size > 0:
+                skipped += 1
+                continue
+            slices = map_interval_to_chunks(interval, chunks)
             print(f"Exporting {i + 1}/{len(merged)}: {clip_path.name} ({interval.end_seconds - interval.start_seconds:.1f}s)")
             render.render_export_clip(slices, clip_path, tmp_dir, export_cfg)
 
+    if skipped:
+        print(f"Skipped {skipped} already-exported clip(s) in {out_dir}")
     print(f"\nExported {len(merged)} clip(s) to {out_dir}")
 
 
@@ -412,6 +429,65 @@ def cmd_vision_compare(cfg: Config, provider: str, tag: str, golden_path: str) -
     print(vision_eval.format_sweep_table(points))
 
 
+def cmd_label_audit(cfg: Config, limit: int | None) -> None:
+    """Audit the existing human-labeled Round 2 dataset (output/review/*)
+    against a fresh AI read of the same clips -- see label_audit.py's
+    module docstring for why (three rounds of detection-prompt tuning all
+    failed to beat audio alone against a golden set derived from these
+    same labels, raising the question of whether the labels themselves
+    hold up). Gemini describes each clip fresh, Claude judges agreement
+    with the original verdict/notes, flagged (disagreeing) rows get an
+    ultrafast/low-res clip rendered for human review, and every row --
+    flagged or not -- lands in the final CSV with blank new_label/
+    new_notes columns to fill in."""
+    if not os.environ.get(cfg.gemini.api_key_env):
+        raise SystemExit(f"label-audit requires {cfg.gemini.api_key_env} to be set (for Gemini descriptions).")
+    if not os.environ.get(cfg.vision.api_key_env):
+        raise SystemExit(f"label-audit requires {cfg.vision.api_key_env} to be set (for the Claude judge).")
+
+    chunks = discover_chunks(cfg.input.source_dir)
+    rows = label_audit.load_review_rows(Path(cfg.label_audit.review_root))
+    if limit is not None:
+        rows = rows[:limit]
+    print(f"Loaded {len(rows)} labeled row(s) from {cfg.label_audit.review_root}")
+
+    out_dir = Path(cfg.label_audit.output_dir)
+    cache_path = out_dir / "audit_cache.json"
+    results = label_audit.run_audit(rows, chunks, cfg.gemini, cfg.vision, cache_path)
+
+    flagged = [ar for ar in results if label_audit.is_flagged(ar.judge, cfg.label_audit.flag_distance_threshold)]
+    flagged = label_audit.sort_by_disagreement(flagged)
+    print(f"\n{len(flagged)}/{len(results)} row(s) flagged for review (threshold={cfg.label_audit.flag_distance_threshold})")
+
+    review_cfg = ReviewConfig(
+        max_width=cfg.label_audit.render_max_width,
+        fps=cfg.label_audit.render_fps,
+        crf=cfg.label_audit.render_crf,
+        preset=cfg.label_audit.render_preset,
+        threads=cfg.label_audit.render_threads,
+        audio_bitrate_kbps=cfg.label_audit.render_audio_bitrate_kbps,
+        mono_audio=cfg.label_audit.render_mono_audio,
+    )
+    clips_dir = out_dir / "flagged_clips"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="soccer_hl_label_audit_render_") as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        for i, ar in enumerate(flagged):
+            row = ar.row
+            score = ar.judge.distance_score if ar.judge else 1.0
+            agreement = ar.judge.agreement if ar.judge else "no_verdict"
+            clip_name = f"{i + 1:03d} - dist{score:.2f} - {agreement} - {row.strategy}_{Path(row.clip_file).stem}.mp4"
+            clip_path = clips_dir / clip_name
+            print(f"  Rendering {clip_path.name}")
+            slices = map_interval_to_chunks(row.interval, chunks)
+            render.render_review_clip(slices, clip_path, tmp_dir, review_cfg)
+
+    report_path = out_dir / "label_audit_report.csv"
+    label_audit.write_report_csv(results, report_path)
+    print(f"\nWrote {len(results)}-row report to {report_path}")
+    print(f"Wrote {len(flagged)} flagged clip(s) to {clips_dir}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sunday Soccer Highlights Engine")
     parser.add_argument("--config", type=str, default=None, help="Path to a config YAML file (default: config/default.yaml)")
@@ -480,6 +556,14 @@ def main() -> None:
     vision_compare_parser.add_argument(
         "--golden-events", default="testdata/golden_events.json", help="Path to a golden_events.json"
     )
+    label_audit_parser = subparsers.add_parser(
+        "label-audit",
+        help="Audit output/review/*'s existing human labels against a fresh Gemini description + Claude "
+        "judge for each clip; render flagged (disagreeing) clips, write a full CSV report",
+    )
+    label_audit_parser.add_argument(
+        "--limit", type=int, default=None, help="Only process the first N labeled rows (for a quick smoke test)"
+    )
 
     args = parser.parse_args()
     cfg = load_config(args.config)
@@ -506,6 +590,8 @@ def main() -> None:
         cmd_vision_highlights(cfg, args.full_quality)
     elif args.command == "vision-compare":
         cmd_vision_compare(cfg, args.provider, args.tag, args.golden_events)
+    elif args.command == "label-audit":
+        cmd_label_audit(cfg, args.limit)
 
 
 if __name__ == "__main__":

@@ -217,6 +217,33 @@ class GeminiConfig:
 
 
 @dataclass
+class LabelAuditConfig:
+    # Re-checks the existing human-labeled Round 2 dataset (output/review/*)
+    # against a Gemini-generated free-text scene description, judged by
+    # Claude for agreement -- not another detection-tuning pass, an audit
+    # of whether the LABELS themselves hold up. See README's Vision AI
+    # section (Label Audit) for why this was worth doing: three straight
+    # rounds of prompt tuning against the existing golden set all failed
+    # to clearly improve on audio alone, raising the question of whether
+    # the ground truth itself needs a second look before tuning further.
+    review_root: str = "output/review"
+    output_dir: str = "output/label_audit"
+    # Deliberately cheaper than ReviewConfig -- this is a "generate in a
+    # few hours" audit pass over the flagged subset, not a real review
+    # round; nobody needs to watch these more than once.
+    render_max_width: int = 960
+    render_fps: float = 24.0
+    render_crf: int = 30
+    render_preset: str = "ultrafast"
+    render_threads: int = 4
+    render_audio_bitrate_kbps: int = 96
+    render_mono_audio: bool = True
+    # A row gets a rendered clip for human review if the judge's agreement
+    # isn't "consistent" or its distance_score is at least this high.
+    flag_distance_threshold: float = 0.5
+
+
+@dataclass
 class Config:
     input: InputConfig = field(default_factory=InputConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
@@ -228,6 +255,7 @@ class Config:
     export: ExportConfig = field(default_factory=ExportConfig)
     vision: VisionConfig = field(default_factory=VisionConfig)
     gemini: GeminiConfig = field(default_factory=GeminiConfig)
+    label_audit: LabelAuditConfig = field(default_factory=LabelAuditConfig)
 
 
 def _apply_dict(obj: Any, data: dict[str, Any]) -> None:
