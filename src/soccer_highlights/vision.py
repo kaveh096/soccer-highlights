@@ -62,6 +62,13 @@ Also write a short, factual one-line caption suitable for use in a filename, des
 
 Respond with ONLY a single JSON object, no other text, no code fence:
 {{"is_event": true or false, "confidence": 0.0-1.0, "caption": "short factual caption", "rationale": "one short sentence"}}"""
+# Round 3 (2026-07-25) tried adding camera position + a precise
+# "interesting moment" definition (goal/save/deflection/narrow miss
+# only). It made BOTH providers worse (Claude F1 0.409->0.385, Gemini
+# 0.432->0.100 -- catastrophic) by rejecting real events that don't
+# unambiguously match the narrow definition from one short clip. Not
+# adopted -- see README's Vision AI Round 3 for the full comparison and
+# `git log`/`git show` for the literal prompt text tested, if revisiting.
 
 _SCAN_PROMPT = """You are reviewing frames from a Sunday recreational soccer game (16-player, half-court), sampled evenly across a {duration:.1f}-second window that NO audio-based detector flagged as interesting.
 

@@ -51,6 +51,35 @@ def test_collect_verdicts_resumes_from_cache_without_recalling(tmp_path):
     assert results[1].is_event is True  # freshly classified
 
 
+def test_collect_verdicts_retries_cached_none_entries(tmp_path):
+    intervals = [Interval(start_seconds=0.0, end_seconds=10.0), Interval(start_seconds=20.0, end_seconds=30.0)]
+    cache_path = tmp_path / "verdicts.json"
+    cache_path.write_text(
+        json.dumps(
+            [
+                {"start_seconds": 0.0, "end_seconds": 10.0, "verdict": None},  # a failed/rate-limited attempt
+                {
+                    "start_seconds": 20.0,
+                    "end_seconds": 30.0,
+                    "verdict": {"is_event": True, "confidence": 0.9, "frame_index": None, "rationale": "", "caption": ""},
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    calls = []
+
+    def fake_classify(interval, chunks):
+        calls.append(interval.start_seconds)
+        return VisionVerdict(is_event=False, confidence=0.95, rationale="now succeeded")
+
+    results = collect_verdicts(intervals, chunks=[], classify_fn=fake_classify, cache_path=cache_path)
+
+    assert calls == [0.0]  # only the previously-failed (None) entry was retried
+    assert results[0].rationale == "now succeeded"
+    assert results[1].is_event is True  # real cached verdict reused, not retried
+
+
 def test_collect_verdicts_detects_cache_mismatch(tmp_path):
     intervals = [Interval(start_seconds=99.0, end_seconds=110.0)]
     cache_path = tmp_path / "verdicts.json"

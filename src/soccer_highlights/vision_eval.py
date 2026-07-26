@@ -66,34 +66,38 @@ def collect_verdicts(
     """Classify every interval via classify_fn, resuming from cache_path if
     it already has entries -- matched by position, so intervals must come
     from the same deterministic detect_intervals call across resumed
-    runs (cache entries also carry start_seconds for a sanity check)."""
+    runs (cache entries also carry start_seconds for a sanity check). A
+    cached REAL verdict is reused as-is; a cached `None` (a failed,
+    errored, or rate-limited attempt -- not a genuine "no verdict" from a
+    successful call) is retried rather than treated as permanently
+    resolved, so a partially-failed run (e.g. hit a rate limit partway
+    through) can be resumed to actual completion."""
     cached = load_cached_verdicts(cache_path)
-    entries: list[dict] = list(cached)
+    entries: list[dict | None] = list(cached) + [None] * max(0, len(intervals) - len(cached))
     results: list[VisionVerdict | None] = []
 
     for i, interval in enumerate(intervals):
-        if i < len(cached):
-            entry = cached[i]
+        entry = entries[i]
+        if entry is not None:
             if abs(entry["start_seconds"] - interval.start_seconds) > 0.5:
                 raise ValueError(
                     f"Cache mismatch at index {i}: cached start={entry['start_seconds']}, "
                     f"actual start={interval.start_seconds}. Delete {cache_path} and rerun."
                 )
-            results.append(_verdict_from_dict(entry["verdict"]))
-            continue
+            if entry["verdict"] is not None:
+                results.append(_verdict_from_dict(entry["verdict"]))
+                continue
 
         verdict = classify_fn(interval, chunks)
         results.append(verdict)
-        entries.append(
-            {
-                "start_seconds": round(interval.start_seconds, 2),
-                "end_seconds": round(interval.end_seconds, 2),
-                "verdict": _verdict_to_dict(verdict),
-            }
-        )
+        entries[i] = {
+            "start_seconds": round(interval.start_seconds, 2),
+            "end_seconds": round(interval.end_seconds, 2),
+            "verdict": _verdict_to_dict(verdict),
+        }
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         with open(cache_path, "w", encoding="utf-8") as f:
-            json.dump(entries, f, indent=2)
+            json.dump(entries[: i + 1], f, indent=2)
 
     return results
 

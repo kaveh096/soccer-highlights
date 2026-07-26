@@ -450,23 +450,65 @@ unmodified confirm prompt):
   Doubling frame density inside the same window doesn't move the needle
   -- rules out "just sample more frames" as an easy fix; the earlier
   confidence-calibration problem isn't simply frame starvation.
-- **Gemini, native video, same prompt**: **blocked by the free-tier
-  quota** (5 requests/minute, 20/day for `gemini-3.6-flash`) -- only
-  23/40 candidates got a real verdict before hitting
-  `RESOURCE_EXHAUSTED`, the rest came back `None` and fail-open (kept by
-  default), so the naive sweep table over that run is not a valid
-  comparison (it mostly reflects the fail-open default, not the model).
-  The 23 real verdicts are still a useful *qualitative* signal, though:
-  confidences are much more decisive than Claude's (0.80-0.95 both
-  directions, vs. Claude's mushy 0.4-0.75 band), and several captions
-  read as correct (e.g. `"Shot on goal scored into the net"` at 0.95
-  confidence for a candidate that likely is a real event). Not enough to
-  draw a real conclusion from -- billing needs enabling on the Gemini
-  key's Cloud project before a fair, complete comparison is possible
-  (this also resolves the free-tier data-use terms question raised
-  earlier). Re-run with `vision-compare --provider gemini --tag
-  gemini-existing-prompt` once that's done -- the cache already has the
-  23 completed candidates and will resume from there.
+- **Gemini, native video, same prompt**: initially blocked by the
+  free-tier quota (5 requests/minute, 20/day for `gemini-3.6-flash`) --
+  only 23/40 candidates got a real verdict before hitting
+  `RESOURCE_EXHAUSTED`. Also exposed a real bug in `collect_verdicts`:
+  it cached *every* attempt including failures, so "resuming" treated
+  the 17 rate-limited `None` results as permanently resolved instead of
+  retrying them -- fixed to only reuse cached *real* verdicts and retry
+  cached `None`s. After the user enabled billing on the key's Cloud
+  project and the fix landed, the complete 40/40 run:
+
+  | | kept | precision | recall | F1 | FN |
+  |---|---|---|---|---|---|
+  | Claude, stills, existing prompt | 31/40 | 0.290 | 0.692 | 0.409 | 4 |
+  | **Gemini, video, existing prompt** | 24/40 | 0.333 | 0.615 | **0.432** | 5 |
+
+  Gemini modestly beats Claude on F1 with the identical prompt, at the
+  cost of one more missed real event -- and it never hedges: every
+  verdict's confidence was >=0.80 (vs. Claude's mushy 0.4-0.75 band), so
+  the sweep table is flat across every threshold value tried.
+
+### Round 3 (vision): the "improved" prompt made both providers worse
+
+Added the two details requested for the confirm prompt: the camera's
+position (next to one goal, facing field center -- so the far goal is
+mostly not clearly visible) and a precise definition of "interesting
+moment" (goal / save / shot-on-target deflected by a defender / a shot
+that missed narrowly on its own -- explicitly excluding routine
+passes/practice/general play). Re-tested both providers against the
+same 40 candidates:
+
+| | kept | precision | recall | F1 | FN |
+|---|---|---|---|---|---|
+| Claude, improved prompt | 39/40 | 0.256 | 0.769 | 0.385 | 3 |
+| Gemini, improved prompt | 7/40 | 0.143 | 0.077 | **0.100** | 12 |
+
+Both got *worse*, not better -- mild for Claude, catastrophic for
+Gemini (missed 12 of 13 golden events). The captions show why: the
+stricter definition correctly rejects genuinely ambiguous "general
+play"/"routine pass" candidates the old looser prompt used to wrongly
+accept (e.g. old Gemini verdict `"Active match play with a shot or pass
+toward the goal area"` -> true; new: `"General play in midfield with no
+shot on goal"` -> false, more accurate) -- but it *also* rejects real
+golden events that don't unambiguously look like a clean goal/save/
+deflection/near-miss from a single ~4-second clip. The precision-focused
+rewrite traded away far more recall than intended, worst for the
+provider that was previously ahead. **Not adopted as the default** --
+kept as a documented negative result, not silently reverted, since it's
+informative: precision and recall from this classifier don't trade off
+smoothly, they can collapse together depending on how the prompt frames
+the decision.
+
+**Next**: a Gemini-specific prompt that (a) describes the input
+accurately as one continuous video clip rather than "sampled frames" and
+(b) explicitly asks it to use the audio track already baked into the
+extracted clip (ball-strike transient, crowd reaction) -- built on top
+of the *original* (best-performing, F1=0.432) prompt, not the Round 3
+strict-definition one that just collapsed, so audio-awareness gets
+tested as its own variable rather than compounded with a change that
+already backfired.
 
 ## Configuration reference
 
