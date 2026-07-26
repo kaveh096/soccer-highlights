@@ -501,14 +501,47 @@ informative: precision and recall from this classifier don't trade off
 smoothly, they can collapse together depending on how the prompt frames
 the decision.
 
-**Next**: a Gemini-specific prompt that (a) describes the input
-accurately as one continuous video clip rather than "sampled frames" and
-(b) explicitly asks it to use the audio track already baked into the
-extracted clip (ball-strike transient, crowd reaction) -- built on top
-of the *original* (best-performing, F1=0.432) prompt, not the Round 3
-strict-definition one that just collapsed, so audio-awareness gets
-tested as its own variable rather than compounded with a change that
-already backfired.
+### Round 4 (vision): audio+video-aware prompt also regresses -- pattern holds
+
+Built `vision_gemini._AV_CONFIRM_PROMPT`: describes the input accurately
+as one continuous video clip (not "sampled frames") and explicitly asks
+the model to use the audio track already baked into the extracted clip
+(the ffmpeg cut always includes `-c:a aac`) -- listen for the ball-strike
+sound or crowd reaction alongside watching the video. Something Claude
+structurally cannot do (stills only), so a genuine Gemini-specific lever,
+built on the *original* prompt's structure (not Round 3's strict
+definition, which had already backfired) so audio-awareness gets tested
+as its own variable.
+
+| | kept | precision | recall | F1 | FN |
+|---|---|---|---|---|---|
+| Gemini, video only, original prompt | 24/40 | 0.333 | 0.615 | **0.432** | 5 |
+| Gemini, video + audio-aware prompt | 12/40 | 0.333 | 0.308 | 0.320 | 9 |
+
+Worse again, not better -- same precision, meaningfully worse recall
+(4 golden events covered instead of 8). **Third negative result in a
+row** with a consistent shape: Round 3's stricter visual definition and
+Round 4's joint audio+video correlation requirement both raise the bar
+for "count this as a real event," and both lose more recall than they
+gain precision. The plain, loose, original prompt -- describe the goal
+(shot/save/goal/crowd reaction to one) at a high level and let the model
+use whatever evidence it has -- remains the best configuration found in
+every round tried. `vision_gemini.classify_confirm`'s active default was
+reverted back to it; `_AV_CONFIRM_PROMPT` is kept in the module,
+documented, not used.
+
+**Overall conclusion across Rounds 1-4**: Gemini native video with the
+original prompt (F1=0.432, precision 0.333, recall 0.615) is the best
+result found, a real but modest improvement over audio alone (F1=0.377).
+Every attempted refinement -- denser Claude frames, a stricter event
+definition, audio-awareness -- made results worse, not better. Further
+prompt engineering along these same lines looks like it has diminishing
+(or negative) returns; a different lever (a stronger/different Gemini
+model, fundamentally different framing, or accepting Round 1's original
+scope of "cut the worst false positives, don't chase a perfect
+classifier") would be the next thing worth trying, not another prompt
+tweak in this family. This round stopped here deliberately rather than
+iterate further -- see git log.
 
 ## Configuration reference
 

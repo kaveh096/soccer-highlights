@@ -37,6 +37,9 @@ Subcommands:
                   marginally beats audio alone on this recording (F1
                   0.377->0.409, one more missed event) -- see README's
                   Vision AI section before assuming it's a clear win.
+                  Gemini video scored better in the same test (F1 0.432,
+                  see vision-compare below) but isn't wired into this
+                  command yet -- still Claude-only.
   vision-compare - classify every candidate interval via --provider
                   {claude,gemini}'s classify_confirm, caching verdicts
                   incrementally (resumable), then sweep
