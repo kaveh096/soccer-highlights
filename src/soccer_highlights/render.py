@@ -26,6 +26,7 @@ def _run_ffmpeg(args: list[str]) -> None:
 
 
 def _encode_piece(source_path: Path, start: float, duration: float, out_path: Path, cfg: ReviewConfig | ExportConfig) -> None:
+    audio_args = ["-ac", "1"] if cfg.mono_audio else []
     _run_ffmpeg(
         [
             "-ss", f"{start:.3f}",
@@ -33,7 +34,7 @@ def _encode_piece(source_path: Path, start: float, duration: float, out_path: Pa
             "-t", f"{duration:.3f}",
             "-vf", f"{_scale_filter(cfg.max_width)},fps={cfg.fps}",
             "-c:v", "libx264", "-preset", cfg.preset, "-crf", str(cfg.crf), "-threads", str(cfg.threads),
-            "-c:a", "aac", "-strict", "-2", "-b:a", f"{cfg.audio_bitrate_kbps}k", "-ac", "1",
+            "-c:a", "aac", "-strict", "-2", "-b:a", f"{cfg.audio_bitrate_kbps}k", *audio_args,
             str(out_path),
         ]
     )

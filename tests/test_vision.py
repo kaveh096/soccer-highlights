@@ -6,9 +6,11 @@ from soccer_highlights.vision import (
     VisionVerdict,
     _evenly_spaced_offsets,
     _parse_verdict_json,
+    _peak_anchor_time,
     decide_confirm,
     decide_scan,
     refine_with_vision,
+    sanitize_caption_for_filename,
 )
 
 
@@ -34,12 +36,19 @@ def test_evenly_spaced_offsets_zero_count():
 
 
 def test_parse_verdict_json_confirm_well_formed():
-    raw = json.dumps({"is_event": True, "confidence": 0.9, "rationale": "looks real"})
+    raw = json.dumps({"is_event": True, "confidence": 0.9, "caption": "Shot on goal", "rationale": "looks real"})
     verdict = _parse_verdict_json(raw, mode="confirm")
     assert verdict.is_event is True
     assert verdict.confidence == 0.9
     assert verdict.frame_index is None
     assert verdict.rationale == "looks real"
+    assert verdict.caption == "Shot on goal"
+
+
+def test_parse_verdict_json_missing_caption_defaults_to_empty():
+    raw = json.dumps({"is_event": False, "confidence": 0.5})
+    verdict = _parse_verdict_json(raw, mode="confirm")
+    assert verdict.caption == ""
 
 
 def test_parse_verdict_json_scan_well_formed():
@@ -141,6 +150,38 @@ def test_decide_scan_maps_frame_index_to_absolute_time():
     peak = decide_scan(gap, verdict, cfg)
 
     assert peak == GlobalPeak(time_seconds=106.0, score=0.9)
+
+
+def test_peak_anchor_time_uses_strongest_peak():
+    interval = Interval(
+        start_seconds=0.0, end_seconds=20.0,
+        peaks=[GlobalPeak(time_seconds=5.0, score=0.3), GlobalPeak(time_seconds=14.0, score=0.9)],
+    )
+    assert _peak_anchor_time(interval) == 14.0
+
+
+def test_peak_anchor_time_falls_back_to_midpoint_when_no_peaks():
+    interval = Interval(start_seconds=10.0, end_seconds=20.0, peaks=[])
+    assert _peak_anchor_time(interval) == 15.0
+
+
+def test_sanitize_caption_for_filename_strips_invalid_windows_chars():
+    assert sanitize_caption_for_filename('Goal: top corner / nice finish') == "Goal top corner nice finish"
+
+
+def test_sanitize_caption_for_filename_collapses_whitespace_and_trims():
+    assert sanitize_caption_for_filename("  Shot   on   goal  ") == "Shot on goal"
+
+
+def test_sanitize_caption_for_filename_truncates_long_captions():
+    caption = "a" * 200
+    result = sanitize_caption_for_filename(caption, max_length=80)
+    assert len(result) == 80
+
+
+def test_sanitize_caption_for_filename_falls_back_when_empty():
+    assert sanitize_caption_for_filename("") == "highlight"
+    assert sanitize_caption_for_filename('///???***') == "highlight"
 
 
 def test_refine_with_vision_drops_confirmed_fp_and_adds_scan_hit():

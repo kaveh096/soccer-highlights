@@ -26,6 +26,17 @@ Subcommands:
                   With --vision, also runs the Phase 2 vision refinement
                   pass (vision.py) and prints its score alongside the
                   audio-only one.
+  vision-highlights - detect, classify+caption each candidate with
+                  peak-anchored frames, and render only the survivors as
+                  clips named "{seconds} - caption.mp4". Fast
+                  review-quality renders by default; --full-quality for
+                  the real export.* (4K) delivery encode once you trust
+                  the surviving timestamps. Pruned candidates get a clip
+                  in a pruned/ subfolder for audit, not deleted outright.
+                  NOTE (2026-07-25 real-footage test): this only
+                  marginally beats audio alone on this recording (F1
+                  0.377->0.409, one more missed event) -- see README's
+                  Vision AI section before assuming it's a clear win.
 """
 
 from __future__ import annotations
@@ -282,6 +293,81 @@ def cmd_golden_score(cfg: Config, golden_path: str, use_vision: bool) -> None:
     print(f"\nWrote vision verdict log to {vision_log_path}")
 
 
+def cmd_vision_highlights(cfg: Config, full_quality: bool) -> None:
+    """Detect, then classify+caption every candidate interval with
+    peak-anchored vision frames (see vision.classify_confirm), and render
+    only the survivors as clips named "{seconds} - caption.mp4". No
+    negative-space scan pass here -- Round 3/4 already showed the audio
+    net alone gets 1.0 must-catch recall on this recording; the actual
+    gap vision needs to close is precision, not more recall, so this
+    command spends its whole API budget on the confirm+caption pass over
+    a (typically loosened) audio-only candidate set instead. Pruned
+    candidates get a clip in a pruned/ subfolder for audit rather than
+    being deleted outright.
+
+    Measured against testdata/golden_events.json (2026-07-25, 40
+    candidates from a loosened onset_flux pass): this only marginally
+    beats not running vision at all (F1 0.377 audio-only -> 0.409 at the
+    default drop_confidence_threshold=0.75, at the cost of one more
+    missed real event). The model's confidence doesn't cleanly separate
+    true from false positives from a handful of still frames -- don't
+    assume this is a solved problem; see README's Vision AI section.
+
+    Defaults to cheap review-quality (cfg.review) renders for both kept
+    and pruned clips -- fast, low-res, safe to run alongside something
+    else on this hardware. Pass --full-quality once you trust the
+    surviving timestamps and want the real cfg.export (4K/CRF18)
+    delivery encode instead; that's slow and CPU-heavy, so don't run it
+    at the same time as another render job.
+
+    The verdict log is written after EVERY interval (not just at the
+    end) so an interrupted run -- e.g. killed to free up the CPU for
+    something else -- still leaves a usable partial vision_events.json
+    and whatever clips finished, instead of losing everything."""
+    if not os.environ.get(cfg.vision.api_key_env):
+        raise SystemExit(f"vision-highlights requires {cfg.vision.api_key_env} to be set.")
+
+    chunks = discover_chunks(cfg.input.source_dir)
+    merged, _traces = _run_detection(cfg, chunks)
+
+    out_dir = Path(cfg.vision.highlights_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pruned_dir = out_dir / "pruned"
+    vision_log_path = out_dir / "vision_events.json"
+
+    log = vision.VisionRunLog()
+    kept_count = 0
+    with tempfile.TemporaryDirectory(prefix="soccer_hl_vision_highlights_") as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        for i, interval in enumerate(merged):
+            print(f"\nClassifying candidate {i + 1}/{len(merged)}: [{interval.start_seconds:.1f}, {interval.end_seconds:.1f}]")
+            verdict = vision.classify_confirm(interval, chunks, cfg.vision)
+            keep = vision.decide_confirm(interval, verdict, cfg.vision)
+            log.entries.append(vision.VisionLogEntry("confirm", interval.start_seconds, interval.end_seconds, verdict, keep))
+            vision.save_vision_log(log, vision_log_path)  # incremental -- survives an interrupted run
+
+            caption = verdict.caption if verdict and verdict.caption else "highlight"
+            safe_caption = vision.sanitize_caption_for_filename(caption)
+            slices = map_interval_to_chunks(interval, chunks)
+            clip_name = f"{interval.start_seconds:.0f} - {safe_caption}.mp4"
+
+            if keep:
+                clip_path = out_dir / clip_name
+                print(f"  KEEP  -> {clip_path.name}  ({verdict.rationale if verdict else 'no verdict, kept by default'})")
+                if full_quality:
+                    render.render_export_clip(slices, clip_path, tmp_dir, cfg.export)
+                else:
+                    render.render_review_clip(slices, clip_path, tmp_dir, cfg.review)
+                kept_count += 1
+            else:
+                pruned_dir.mkdir(parents=True, exist_ok=True)
+                clip_path = pruned_dir / clip_name
+                print(f"  PRUNE -> {clip_path.name}  ({verdict.rationale if verdict else ''})")
+                render.render_review_clip(slices, clip_path, tmp_dir, cfg.review)
+
+    print(f"\nKept {kept_count}/{len(merged)} candidate(s) in {out_dir}. Wrote log to {vision_log_path}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sunday Soccer Highlights Engine")
     parser.add_argument("--config", type=str, default=None, help="Path to a config YAML file (default: config/default.yaml)")
@@ -326,6 +412,18 @@ def main() -> None:
         help="Also run the Phase 2 vision refinement pass and print its score alongside the audio-only one "
         "(calls the Claude API; requires vision.api_key_env, default ANTHROPIC_API_KEY, to be set)",
     )
+    vision_highlights_parser = subparsers.add_parser(
+        "vision-highlights",
+        help="Detect, classify+caption each candidate with peak-anchored vision frames, "
+        "render only the survivors as clips named '{seconds} - caption.mp4' "
+        "(fast review-quality by default; --full-quality for the real 4K delivery encode)",
+    )
+    vision_highlights_parser.add_argument(
+        "--full-quality",
+        action="store_true",
+        help="Render kept clips with cfg.export (4K/CRF18) instead of the fast cfg.review default. "
+        "Slow and CPU-heavy -- don't run alongside another render job on this hardware.",
+    )
 
     args = parser.parse_args()
     cfg = load_config(args.config)
@@ -348,6 +446,8 @@ def main() -> None:
         cmd_export(cfg, args.out_dir)
     elif args.command == "golden-score":
         cmd_golden_score(cfg, args.golden_events, args.vision)
+    elif args.command == "vision-highlights":
+        cmd_vision_highlights(cfg, args.full_quality)
 
 
 if __name__ == "__main__":

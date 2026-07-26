@@ -354,13 +354,16 @@ built on the same `Interval`/`GlobalPeak` primitives
 [`timeline.py`](src/soccer_highlights/timeline.py) already provides:
 
 - **Confirm**: for every audio-flagged interval, sample
-  `vision.frames_per_window` frames evenly across it and ask whether they
-  show real in-play action or a false-positive-shaped moment (practice
-  shot, break-time chatter). An interval is only *dropped* on a
-  false-positive verdict at or above `vision.drop_confidence_threshold`
-  -- recall-first, matching this project's standing tuning priority: an
-  uncertain or errored vision call keeps the interval rather than risk
-  discarding a real event.
+  `vision.frames_per_window` frames from a `vision.peak_window_seconds`
+  window CENTERED ON THE INTERVAL'S DETECTED PEAK (not spread evenly
+  across the whole clip -- see the 2026-07-25 finding below for why that
+  distinction mattered in practice) and ask whether they show real
+  in-play action or a false-positive-shaped moment (practice shot,
+  break-time chatter), plus a short factual caption. An interval is only
+  *dropped* on a false-positive verdict at or above
+  `vision.drop_confidence_threshold` -- recall-first, matching this
+  project's standing tuning priority: an uncertain or errored vision call
+  keeps the interval rather than risk discarding a real event.
 - **Scan**: for every gap no audio strategy flagged (`invert_intervals`,
   same negative-space chunking `batch-review` already uses), sample
   frames across it and ask whether a real event is visible anyway. A new
@@ -373,17 +376,64 @@ Both passes return per-window verdicts (`VisionRunLog`) written to
 `vision_events.json` for spot-checking against real clips -- the same
 role `metadata.events_path` plays for audio.
 
-**Status**: implemented and unit-tested (pure decision logic only --
-`_evenly_spaced_offsets`, `_parse_verdict_json`, `decide_confirm`,
-`decide_scan`, `refine_with_vision`'s merge step, all against
+`soccer-highlights vision-highlights` runs confirm-only (no scan pass --
+see below) over a real audio-detect pass, renders survivors as
+`"{seconds} - caption.mp4"` (fast `cfg.review` renders by default,
+`--full-quality` for the real `cfg.export` 4K delivery encode once
+you trust the surviving timestamps), and archives pruned candidates in a
+`pruned/` subfolder for audit instead of deleting them.
+
+Pure decision logic (`_evenly_spaced_offsets`, `_parse_verdict_json`,
+`_peak_anchor_time`, `sanitize_caption_for_filename`, `decide_confirm`,
+`decide_scan`, `refine_with_vision`'s merge step) is unit-tested against
 injected/fake verdicts, no real API or ffmpeg calls in `pytest`, same
-split as `audio.py`/`clipping.py`/`render.py`). **Not yet validated
-against real footage or wired into `render`/`export`/`batch-review`** --
-no `ANTHROPIC_API_KEY` has been set up yet. Once one exists, run
-`soccer-highlights golden-score --vision` against
-`testdata/golden_events.json` and compare its audio-only vs.
-vision-refined scores; results will be written up here the same way
-Round 1/3/4 were, after actually running it -- not speculated in advance.
+split as `audio.py`/`clipping.py`/`render.py`.
+
+### Round 1 (vision): confirm+caption only marginally beats audio alone
+
+Tested against the real round-2 recording and `testdata/golden_events.json`
+on 2026-07-25, in two passes:
+
+1. **First pass** (whole-clip evenly-spaced frame sampling, the original
+   design): recall collapsed, 0.77 -> 0.23 (FN 3 -> 10). Root cause: a
+   real shot/strike is a sub-second transient; 5 frames spread across a
+   12-20s clip usually land just before/after the actual moment, so the
+   model confidently (0.75-0.85) misread real events as practice shots.
+   Fixed by anchoring frame sampling on the interval's detected peak time
+   (`_peak_anchor_time`) instead of spreading across the whole clip.
+2. **Second pass** (peak-anchored, loosened audio to `min_score=0.45`
+   first to test whether that recovered any additional recall -- it
+   didn't: FN stayed at 3, loosening past `min_score=0.55` just added
+   more false positives, confirming Round 3/4's finding again rather than
+   revealing anything new). Confirm+caption's actual effect, swept
+   offline against the cached verdicts (no extra API calls, same idea as
+   the audio `min_score` sweep):
+
+   | `drop_confidence_threshold` | kept | precision | recall | F1 | FN |
+   |---|---|---|---|---|---|
+   | (no filtering / audio-only) | 40/40 | 0.250 | 0.769 | 0.377 | 3 |
+   | 0.75 (current default) | 31/40 | 0.290 | 0.692 | 0.409 | 4 |
+   | 0.70 | 28/40 | 0.286 | 0.615 | 0.390 | 5 |
+   | 0.65 | 26/40 | 0.231 | 0.462 | 0.308 | 7 |
+   | <=0.60 | 9/40 | 0.222 | 0.154 | 0.182 | 11 |
+
+**Conclusion**: the current default (0.75) is the best value found, but
+"best" means +0.03 F1 over not running vision at all, at the cost of one
+more missed real event -- not the clear precision win Phase 2 set out to
+find. Below 0.70 it gets worse than doing nothing. The model's confidence
+score does not cleanly separate true from false positives in the 0.6-0.75
+band from a handful of low-res stills; peak-anchoring fixed the
+catastrophic recall bug but didn't turn this into a reliable classifier.
+
+**Not yet tried**: Gemini's native video API (not frame extraction --
+Google's docs confirm it also subsamples at 1 FPS by default, so it isn't
+automatically better, but continuous motion between frames might help
+where discrete stills don't; a `GEMINI_API_KEY` is set up and ready for
+this experiment whenever it's picked back up). Also not tried: denser
+frame sampling within the peak window on Claude before concluding stills
+are a dead end. This round stopped here deliberately -- see git log for
+the "stop and commit as infrastructure" decision -- rather than chasing
+threshold numbers further on a design that may not be the right one.
 
 ## Configuration reference
 

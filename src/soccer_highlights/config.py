@@ -121,6 +121,9 @@ class ReviewConfig:
     preset: str = "veryfast"
     threads: int = 4
     audio_bitrate_kbps: int = 128
+    # Downmixed to mono -- these are cheap, small review clips only meant
+    # for a quick true/false-positive judgment, not the sharing deliverable.
+    mono_audio: bool = True
     # Negative-space clips: gaps not covered by ANY strategy's candidate
     # intervals, chunked for review so nothing is silently missed.
     max_negative_clip_seconds: float = 120.0
@@ -146,6 +149,11 @@ class ExportConfig:
     preset: str = "medium"
     threads: int = 0  # 0 = let ffmpeg use all available cores
     audio_bitrate_kbps: int = 192
+    # Preserve the source's original channel count -- this is the sharing
+    # deliverable, not a cheap review clip, so it should NOT be downmixed
+    # to mono (a bug in the first cut of this config: it was forced mono
+    # unconditionally, same as review clips, until caught 2026-07-25).
+    mono_audio: bool = False
 
 
 @dataclass
@@ -160,6 +168,17 @@ class VisionConfig:
     # source -- same reasoning as audio detection: cheap, fast to decode
     # on old hardware, and plenty of detail for a classification call.
     frame_max_width: int = 640
+    # Confirm pass: frames are sampled from a window this wide, CENTERED ON
+    # THE INTERVAL'S PEAK TIME -- not spread across the whole (lookback +
+    # post_peak) clip. A real shot/strike is a sub-second transient; the
+    # first real-footage test (2026-07-25) showed even spacing across a
+    # 12-20s clip usually lands all sampled frames just before/after the
+    # actual moment, so the model confidently (0.75-0.85) misreads a real
+    # event as a practice shot -- recall collapsed 0.77->0.23. Anchoring on
+    # the known peak timestamp (already detected by audio) fixes this.
+    peak_window_seconds: float = 4.0
+    # Where `vision-highlights` writes its kept/pruned clips.
+    highlights_dir: str = "output/vision_highlights"
     # Confirm pass: an audio-flagged interval is only DROPPED if vision
     # reports a false positive at or above this confidence. Recall-first
     # per the project's standing priority -- an uncertain or errored call

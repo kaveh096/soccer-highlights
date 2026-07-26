@@ -6,12 +6,17 @@ detection: cheap and fast to decode on old hardware).
 Two passes, one prompt each, both aimed at Phase 1's two confirmed,
 human-labeled failure modes (see README's Limitations section):
 
-- **Confirm**: for every audio-flagged interval, ask whether the frames
-  show real in-play action or something that sounds similar on audio but
-  isn't (a practice shot during a break, crowd chatter). Only drops an
-  interval on a confident false-positive verdict -- recall-first, per the
-  project's standing tuning priority, so an uncertain or errored call
-  keeps the interval rather than discarding a possibly-real event.
+- **Confirm**: for every audio-flagged interval, sample frames from a
+  tight window centered on the interval's detected peak (see
+  `_peak_anchor_time` -- NOT spread across the whole clip; a real
+  shot/strike is a sub-second transient that even spacing across a
+  12-20s clip reliably misses, confirmed against real footage
+  2026-07-25) and ask whether they show real in-play action or something
+  that sounds similar on audio but isn't (a practice shot during a
+  break, crowd chatter), plus a short factual caption. Only drops an
+  interval on a confident false-positive verdict -- recall-first, per
+  the project's standing tuning priority, so an uncertain or errored
+  call keeps the interval rather than discarding a possibly-real event.
 - **Scan**: for every gap no audio strategy flagged, ask whether a real
   event (e.g. a quiet, far-side goal) is visible anyway. Only adds a new
   interval on a confident event verdict, windowed the same
@@ -30,6 +35,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -48,12 +54,14 @@ from soccer_highlights.timeline import (
     peaks_to_raw_intervals,
 )
 
-_CONFIRM_PROMPT = """You are reviewing frames from a Sunday recreational soccer game (16-player, half-court), sampled evenly across a {duration:.1f}-second window that an audio-based detector flagged as a possible shot on target or goal.
+_CONFIRM_PROMPT = """You are reviewing frames from a Sunday recreational soccer game (16-player, half-court). An audio-based detector flagged a possible shot on target or goal; these frames are sampled from a {duration:.1f}-second window CENTERED ON THE MOMENT OF LOUDEST AUDIO ACTIVITY (the likely instant of ball contact or crowd reaction) -- they are not spread across the whole highlight clip, just the moment itself.
 
-Decide whether the frames show REAL in-play action (an actual shot, save, goal, or the crowd's live reaction to one) versus something that can sound similar on audio but isn't: a practice/drill shot during a stoppage, players standing around or chatting during a break, warm-up, etc.
+Decide whether the frames show REAL in-play action (an actual shot, save, goal, or the crowd's live reaction to one) versus something that can sound similar on audio but isn't: a practice/drill shot during a stoppage, players standing around or chatting during a break, warm-up, etc. The actual moment can be brief and easy to miss between frames -- if the frames are ambiguous or don't clearly rule out a real event, prefer is_event: true. It's worse to discard a real highlight than to keep one extra false positive.
+
+Also write a short, factual one-line caption suitable for use in a filename, describing only what's visibly confirmable (e.g. "Shot on goal saved by keeper", "Goal celebration near far post"). Do not invent player names, jersey numbers, or the exact score unless clearly legible.
 
 Respond with ONLY a single JSON object, no other text, no code fence:
-{{"is_event": true or false, "confidence": 0.0-1.0, "rationale": "one short sentence"}}"""
+{{"is_event": true or false, "confidence": 0.0-1.0, "caption": "short factual caption", "rationale": "one short sentence"}}"""
 
 _SCAN_PROMPT = """You are reviewing frames from a Sunday recreational soccer game (16-player, half-court), sampled evenly across a {duration:.1f}-second window that NO audio-based detector flagged as interesting.
 
@@ -69,6 +77,7 @@ class VisionVerdict:
     confidence: float
     frame_index: int | None = None
     rationale: str = ""
+    caption: str = ""
 
 
 @dataclass
@@ -128,6 +137,7 @@ def _parse_verdict_json(raw_text: str, mode: str) -> VisionVerdict:
         confidence=confidence,
         frame_index=frame_index,
         rationale=str(data.get("rationale", "")),
+        caption=str(data.get("caption", "")),
     )
 
 
@@ -156,6 +166,29 @@ def decide_scan(gap: Interval, verdict: VisionVerdict | None, cfg: VisionConfig)
     if not (0 <= verdict.frame_index < len(offsets)):
         return None
     return GlobalPeak(time_seconds=gap.start_seconds + offsets[verdict.frame_index], score=verdict.confidence)
+
+
+def _peak_anchor_time(interval: Interval) -> float:
+    """The moment within an interval most likely to show the actual event --
+    its strongest detected peak, or the interval's midpoint if it somehow
+    has none (shouldn't happen for a real audio-flagged interval)."""
+    if not interval.peaks:
+        return (interval.start_seconds + interval.end_seconds) / 2
+    return max(interval.peaks, key=lambda p: p.score).time_seconds
+
+
+_INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def sanitize_caption_for_filename(caption: str, max_length: int = 80) -> str:
+    """Make an LLM-generated caption safe to use as a Windows filename
+    component: strip characters Windows forbids, collapse whitespace, and
+    trim trailing dots/spaces (also disallowed). Falls back to "highlight"
+    if nothing usable survives."""
+    cleaned = _INVALID_FILENAME_CHARS.sub("", caption)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = cleaned[:max_length].rstrip(". ")
+    return cleaned or "highlight"
 
 
 ClassifyConfirmFn = Callable[[Interval, list[Chunk], VisionConfig], "VisionVerdict | None"]
@@ -283,13 +316,26 @@ def _call_claude(image_paths: list[Path], prompt: str, cfg: VisionConfig) -> str
 
 
 def classify_confirm(interval: Interval, chunks: list[Chunk], cfg: VisionConfig) -> VisionVerdict | None:
+    """Classify one audio-flagged interval. Frames are sampled from a tight
+    window centered on the interval's strongest peak (see
+    `_peak_anchor_time`), not spread across the whole lookback/post_peak
+    clip -- a real shot/strike is a sub-second transient that even spacing
+    across a 12-20s clip usually misses entirely."""
+    anchor = _peak_anchor_time(interval)
+    half_window = cfg.peak_window_seconds / 2
+    sample_start = max(interval.start_seconds, anchor - half_window)
+    sample_end = min(interval.end_seconds, anchor + half_window)
+    if sample_end <= sample_start:
+        sample_start, sample_end = interval.start_seconds, interval.end_seconds
+    sample_window = Interval(start_seconds=sample_start, end_seconds=sample_end)
+
     with tempfile.TemporaryDirectory(prefix="soccer_hl_vision_") as tmp_dir_str:
         tmp_dir = Path(tmp_dir_str)
-        slices = map_interval_to_chunks(interval, chunks)
+        slices = map_interval_to_chunks(sample_window, chunks)
         frame_paths = extract_frame_samples(slices, cfg.frames_per_window, tmp_dir, cfg.frame_max_width)
         if not frame_paths:
             return None
-        prompt = _CONFIRM_PROMPT.format(duration=interval.end_seconds - interval.start_seconds)
+        prompt = _CONFIRM_PROMPT.format(duration=sample_end - sample_start)
         try:
             raw = _call_claude(frame_paths, prompt, cfg)
             return _parse_verdict_json(raw, mode="confirm")
