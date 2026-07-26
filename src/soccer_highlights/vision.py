@@ -40,7 +40,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Protocol
 
 from soccer_highlights.config import TimelineConfig, VisionConfig
 from soccer_highlights.discovery import Chunk
@@ -141,7 +141,11 @@ def _parse_verdict_json(raw_text: str, mode: str) -> VisionVerdict:
     )
 
 
-def decide_confirm(interval: Interval, verdict: VisionVerdict | None, cfg: VisionConfig) -> bool:
+class _HasDropThreshold(Protocol):
+    drop_confidence_threshold: float
+
+
+def decide_confirm(interval: Interval, verdict: VisionVerdict | None, cfg: _HasDropThreshold) -> bool:
     """Whether an audio-flagged interval survives the confirm pass.
     Fail-open: no verdict (API/parse error), an event verdict, or a
     false-positive verdict below the drop-confidence bar all keep it."""
@@ -175,6 +179,25 @@ def _peak_anchor_time(interval: Interval) -> float:
     if not interval.peaks:
         return (interval.start_seconds + interval.end_seconds) / 2
     return max(interval.peaks, key=lambda p: p.score).time_seconds
+
+
+class _HasPeakWindow(Protocol):
+    peak_window_seconds: float
+
+
+def _peak_sample_window(interval: Interval, cfg: _HasPeakWindow) -> Interval:
+    """The tight sub-window (peak_window_seconds wide, centered on the
+    interval's strongest peak) that both the Claude (stills) and Gemini
+    (short video clip) implementations sample from -- shared so a
+    provider comparison is looking at the identical time range, clamped
+    to the original interval's bounds."""
+    anchor = _peak_anchor_time(interval)
+    half_window = cfg.peak_window_seconds / 2
+    sample_start = max(interval.start_seconds, anchor - half_window)
+    sample_end = min(interval.end_seconds, anchor + half_window)
+    if sample_end <= sample_start:
+        return Interval(start_seconds=interval.start_seconds, end_seconds=interval.end_seconds)
+    return Interval(start_seconds=sample_start, end_seconds=sample_end)
 
 
 _INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -321,27 +344,21 @@ def classify_confirm(interval: Interval, chunks: list[Chunk], cfg: VisionConfig)
     `_peak_anchor_time`), not spread across the whole lookback/post_peak
     clip -- a real shot/strike is a sub-second transient that even spacing
     across a 12-20s clip usually misses entirely."""
-    anchor = _peak_anchor_time(interval)
-    half_window = cfg.peak_window_seconds / 2
-    sample_start = max(interval.start_seconds, anchor - half_window)
-    sample_end = min(interval.end_seconds, anchor + half_window)
-    if sample_end <= sample_start:
-        sample_start, sample_end = interval.start_seconds, interval.end_seconds
-    sample_window = Interval(start_seconds=sample_start, end_seconds=sample_end)
+    sample_window = _peak_sample_window(interval, cfg)
 
-    with tempfile.TemporaryDirectory(prefix="soccer_hl_vision_") as tmp_dir_str:
-        tmp_dir = Path(tmp_dir_str)
-        slices = map_interval_to_chunks(sample_window, chunks)
-        frame_paths = extract_frame_samples(slices, cfg.frames_per_window, tmp_dir, cfg.frame_max_width)
-        if not frame_paths:
-            return None
-        prompt = _CONFIRM_PROMPT.format(duration=sample_end - sample_start)
-        try:
+    try:
+        with tempfile.TemporaryDirectory(prefix="soccer_hl_vision_") as tmp_dir_str:
+            tmp_dir = Path(tmp_dir_str)
+            slices = map_interval_to_chunks(sample_window, chunks)
+            frame_paths = extract_frame_samples(slices, cfg.frames_per_window, tmp_dir, cfg.frame_max_width)
+            if not frame_paths:
+                return None
+            prompt = _CONFIRM_PROMPT.format(duration=sample_window.end_seconds - sample_window.start_seconds)
             raw = _call_claude(frame_paths, prompt, cfg)
             return _parse_verdict_json(raw, mode="confirm")
-        except Exception as exc:
-            print(f"WARNING: vision confirm failed for [{interval.start_seconds:.1f}, {interval.end_seconds:.1f}]: {exc}")
-            return None
+    except Exception as exc:
+        print(f"WARNING: vision confirm failed for [{interval.start_seconds:.1f}, {interval.end_seconds:.1f}]: {exc}")
+        return None
 
 
 def save_vision_log(log: VisionRunLog, path: Path) -> None:
@@ -359,6 +376,7 @@ def save_vision_log(log: VisionRunLog, path: Path) -> None:
                 "confidence": round(e.verdict.confidence, 3),
                 "frame_index": e.verdict.frame_index,
                 "rationale": e.verdict.rationale,
+                "caption": e.verdict.caption,
             },
         }
         for e in log.entries
@@ -368,18 +386,18 @@ def save_vision_log(log: VisionRunLog, path: Path) -> None:
 
 
 def classify_scan(gap: Interval, chunks: list[Chunk], cfg: VisionConfig) -> VisionVerdict | None:
-    with tempfile.TemporaryDirectory(prefix="soccer_hl_vision_") as tmp_dir_str:
-        tmp_dir = Path(tmp_dir_str)
-        slices = map_interval_to_chunks(gap, chunks)
-        frame_paths = extract_frame_samples(slices, cfg.frames_per_window, tmp_dir, cfg.frame_max_width)
-        if not frame_paths:
-            return None
-        prompt = _SCAN_PROMPT.format(
-            duration=gap.end_seconds - gap.start_seconds, last_index=cfg.frames_per_window - 1
-        )
-        try:
+    try:
+        with tempfile.TemporaryDirectory(prefix="soccer_hl_vision_") as tmp_dir_str:
+            tmp_dir = Path(tmp_dir_str)
+            slices = map_interval_to_chunks(gap, chunks)
+            frame_paths = extract_frame_samples(slices, cfg.frames_per_window, tmp_dir, cfg.frame_max_width)
+            if not frame_paths:
+                return None
+            prompt = _SCAN_PROMPT.format(
+                duration=gap.end_seconds - gap.start_seconds, last_index=cfg.frames_per_window - 1
+            )
             raw = _call_claude(frame_paths, prompt, cfg)
             return _parse_verdict_json(raw, mode="scan")
-        except Exception as exc:
-            print(f"WARNING: vision scan failed for [{gap.start_seconds:.1f}, {gap.end_seconds:.1f}]: {exc}")
-            return None
+    except Exception as exc:
+        print(f"WARNING: vision scan failed for [{gap.start_seconds:.1f}, {gap.end_seconds:.1f}]: {exc}")
+        return None

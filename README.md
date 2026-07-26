@@ -425,15 +425,48 @@ score does not cleanly separate true from false positives in the 0.6-0.75
 band from a handful of low-res stills; peak-anchoring fixed the
 catastrophic recall bug but didn't turn this into a reliable classifier.
 
-**Not yet tried**: Gemini's native video API (not frame extraction --
-Google's docs confirm it also subsamples at 1 FPS by default, so it isn't
-automatically better, but continuous motion between frames might help
-where discrete stills don't; a `GEMINI_API_KEY` is set up and ready for
-this experiment whenever it's picked back up). Also not tried: denser
-frame sampling within the peak window on Claude before concluding stills
-are a dead end. This round stopped here deliberately -- see git log for
-the "stop and commit as infrastructure" decision -- rather than chasing
-threshold numbers further on a design that may not be the right one.
+### Round 2 (vision): provider/frame-density comparison infrastructure
+
+Built `vision_gemini.py` (Gemini native-video counterpart to Claude's
+stills-based confirm pass -- same peak-anchored sample window via the
+now-shared `vision._peak_sample_window`, same unmodified `_CONFIRM_PROMPT`
+for a fair first comparison, but sends one short video clip via
+`generateContent`'s `inline_data` instead of discrete stills) and
+`vision_eval.py` (a reusable, tested harness: `collect_verdicts` caches
+each classify call incrementally to `output/vision_compare/<tag>.json`
+so an interrupted run against a real paid API doesn't lose progress, and
+resumes automatically; `sweep_drop_threshold` scores the same cached
+verdicts at several thresholds, offline/free, same idea as the audio
+`min_score` sweep one layer up). Exposed via `soccer-highlights
+vision-compare --provider {claude,gemini} --tag LABEL` -- pure
+measurement, no rendering.
+
+Two results against the same 40 candidates (`min_score=0.45`,
+unmodified confirm prompt):
+
+- **Claude, denser frame sampling** (10 frames instead of 5, same 4s peak
+  window -- 2.5 FPS instead of 1.25 FPS): essentially no change at the
+  best threshold (F1 0.409, FN=4, identical to the 5-frame result).
+  Doubling frame density inside the same window doesn't move the needle
+  -- rules out "just sample more frames" as an easy fix; the earlier
+  confidence-calibration problem isn't simply frame starvation.
+- **Gemini, native video, same prompt**: **blocked by the free-tier
+  quota** (5 requests/minute, 20/day for `gemini-3.6-flash`) -- only
+  23/40 candidates got a real verdict before hitting
+  `RESOURCE_EXHAUSTED`, the rest came back `None` and fail-open (kept by
+  default), so the naive sweep table over that run is not a valid
+  comparison (it mostly reflects the fail-open default, not the model).
+  The 23 real verdicts are still a useful *qualitative* signal, though:
+  confidences are much more decisive than Claude's (0.80-0.95 both
+  directions, vs. Claude's mushy 0.4-0.75 band), and several captions
+  read as correct (e.g. `"Shot on goal scored into the net"` at 0.95
+  confidence for a candidate that likely is a real event). Not enough to
+  draw a real conclusion from -- billing needs enabling on the Gemini
+  key's Cloud project before a fair, complete comparison is possible
+  (this also resolves the free-tier data-use terms question raised
+  earlier). Re-run with `vision-compare --provider gemini --tag
+  gemini-existing-prompt` once that's done -- the cache already has the
+  23 completed candidates and will resume from there.
 
 ## Configuration reference
 

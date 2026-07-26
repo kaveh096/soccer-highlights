@@ -194,6 +194,29 @@ class VisionConfig:
 
 
 @dataclass
+class GeminiConfig:
+    # Gemini native-video counterpart to VisionConfig's Claude stills-based
+    # confirm pass -- for a direct comparison of "continuous video" vs.
+    # "discrete extracted frames" on the identical candidate set. Google's
+    # own docs confirm Gemini also subsamples video at 1 FPS by default, so
+    # this isn't a free win over frame extraction; it's a real experiment,
+    # not an assumed upgrade (see README's Vision AI section, 2026-07-25).
+    enabled: bool = False
+    model: str = "gemini-flash-latest"
+    api_key_env: str = "GEMINI_API_KEY"
+    # Same concept as VisionConfig.peak_window_seconds -- the short video
+    # clip sent to Gemini is cut from this window, centered on the
+    # interval's detected peak, so both providers see the identical time
+    # range for a fair comparison.
+    peak_window_seconds: float = 4.0
+    clip_max_width: int = 640
+    drop_confidence_threshold: float = 0.75
+    add_confidence_threshold: float = 0.75
+    request_timeout_seconds: float = 60.0
+    max_retries: int = 2
+
+
+@dataclass
 class Config:
     input: InputConfig = field(default_factory=InputConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
@@ -204,6 +227,7 @@ class Config:
     review: ReviewConfig = field(default_factory=ReviewConfig)
     export: ExportConfig = field(default_factory=ExportConfig)
     vision: VisionConfig = field(default_factory=VisionConfig)
+    gemini: GeminiConfig = field(default_factory=GeminiConfig)
 
 
 def _apply_dict(obj: Any, data: dict[str, Any]) -> None:

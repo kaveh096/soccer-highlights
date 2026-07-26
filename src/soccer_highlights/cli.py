@@ -37,6 +37,13 @@ Subcommands:
                   marginally beats audio alone on this recording (F1
                   0.377->0.409, one more missed event) -- see README's
                   Vision AI section before assuming it's a clear win.
+  vision-compare - classify every candidate interval via --provider
+                  {claude,gemini}'s classify_confirm, caching verdicts
+                  incrementally (resumable), then sweep
+                  drop_confidence_threshold offline against the golden
+                  set. Pure measurement, no rendering -- for comparing
+                  providers/prompts/frame-density settings on the exact
+                  same candidate set. See README's Vision AI section.
 """
 
 from __future__ import annotations
@@ -46,7 +53,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from soccer_highlights import clipping, render, vision
+from soccer_highlights import clipping, render, vision, vision_eval, vision_gemini
 from soccer_highlights.audio import extract_audio_samples
 from soccer_highlights.config import Config, load_config, load_strategy_configs
 from soccer_highlights.detection import analyze
@@ -368,6 +375,40 @@ def cmd_vision_highlights(cfg: Config, full_quality: bool) -> None:
     print(f"\nKept {kept_count}/{len(merged)} candidate(s) in {out_dir}. Wrote log to {vision_log_path}")
 
 
+def cmd_vision_compare(cfg: Config, provider: str, tag: str, golden_path: str) -> None:
+    """Classify every candidate interval via the chosen provider's
+    classify_confirm, caching verdicts incrementally to
+    output/vision_compare/<tag>.json (safe to interrupt and rerun -- only
+    uncached intervals get re-classified), then sweep
+    drop_confidence_threshold offline against the golden set. Pure
+    measurement like golden-score -- no clip rendering, so this is the
+    cheap way to compare providers/prompts/frame-density settings on the
+    exact same candidate set."""
+    if provider == "claude":
+        if not os.environ.get(cfg.vision.api_key_env):
+            raise SystemExit(f"vision-compare --provider claude requires {cfg.vision.api_key_env} to be set.")
+        classify_fn = lambda interval, chunks: vision.classify_confirm(interval, chunks, cfg.vision)  # noqa: E731
+    elif provider == "gemini":
+        if not os.environ.get(cfg.gemini.api_key_env):
+            raise SystemExit(f"vision-compare --provider gemini requires {cfg.gemini.api_key_env} to be set.")
+        classify_fn = lambda interval, chunks: vision_gemini.classify_confirm(interval, chunks, cfg.gemini)  # noqa: E731
+    else:
+        raise SystemExit(f"Unknown provider: {provider!r}")
+
+    chunks = discover_chunks(cfg.input.source_dir)
+    merged, _traces = _run_detection(cfg, chunks)
+    golden_events = load_golden_events(Path(golden_path))
+
+    cache_path = Path("output/vision_compare") / f"{tag}.json"
+    print(f"Classifying {len(merged)} candidate(s) via {provider} (cache: {cache_path})...")
+    verdicts = vision_eval.collect_verdicts(merged, chunks, classify_fn, cache_path)
+
+    thresholds = [1.01, 0.80, 0.75, 0.70, 0.65, 0.60, 0.55, 0.50]
+    points = vision_eval.sweep_drop_threshold(merged, verdicts, golden_events, thresholds)
+    print(f"\n=== {tag} ({provider}) vs golden set ({len(golden_events)} events, {len(merged)} candidates) ===")
+    print(vision_eval.format_sweep_table(points))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sunday Soccer Highlights Engine")
     parser.add_argument("--config", type=str, default=None, help="Path to a config YAML file (default: config/default.yaml)")
@@ -424,6 +465,18 @@ def main() -> None:
         help="Render kept clips with cfg.export (4K/CRF18) instead of the fast cfg.review default. "
         "Slow and CPU-heavy -- don't run alongside another render job on this hardware.",
     )
+    vision_compare_parser = subparsers.add_parser(
+        "vision-compare",
+        help="Classify every candidate via --provider {claude,gemini}, cache verdicts, sweep "
+        "drop_confidence_threshold offline against the golden set -- pure measurement, no rendering",
+    )
+    vision_compare_parser.add_argument("--provider", choices=["claude", "gemini"], required=True)
+    vision_compare_parser.add_argument(
+        "--tag", required=True, help="Label for this run's verdict cache, e.g. 'claude-existing-prompt'"
+    )
+    vision_compare_parser.add_argument(
+        "--golden-events", default="testdata/golden_events.json", help="Path to a golden_events.json"
+    )
 
     args = parser.parse_args()
     cfg = load_config(args.config)
@@ -448,6 +501,8 @@ def main() -> None:
         cmd_golden_score(cfg, args.golden_events, args.vision)
     elif args.command == "vision-highlights":
         cmd_vision_highlights(cfg, args.full_quality)
+    elif args.command == "vision-compare":
+        cmd_vision_compare(cfg, args.provider, args.tag, args.golden_events)
 
 
 if __name__ == "__main__":

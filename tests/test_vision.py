@@ -7,6 +7,7 @@ from soccer_highlights.vision import (
     _evenly_spaced_offsets,
     _parse_verdict_json,
     _peak_anchor_time,
+    _peak_sample_window,
     decide_confirm,
     decide_scan,
     refine_with_vision,
@@ -163,6 +164,35 @@ def test_peak_anchor_time_uses_strongest_peak():
 def test_peak_anchor_time_falls_back_to_midpoint_when_no_peaks():
     interval = Interval(start_seconds=10.0, end_seconds=20.0, peaks=[])
     assert _peak_anchor_time(interval) == 15.0
+
+
+def _cfg_with_window(peak_window_seconds: float) -> VisionConfig:
+    return VisionConfig(peak_window_seconds=peak_window_seconds)
+
+
+def test_peak_sample_window_centers_on_peak_within_bounds():
+    interval = Interval(
+        start_seconds=0.0, end_seconds=20.0, peaks=[GlobalPeak(time_seconds=10.0, score=1.0)]
+    )
+    window = _peak_sample_window(interval, _cfg_with_window(4.0))
+    assert window.start_seconds == 8.0
+    assert window.end_seconds == 12.0
+
+
+def test_peak_sample_window_clamps_to_interval_bounds_near_edge():
+    interval = Interval(
+        start_seconds=0.0, end_seconds=20.0, peaks=[GlobalPeak(time_seconds=1.0, score=1.0)]
+    )
+    window = _peak_sample_window(interval, _cfg_with_window(4.0))
+    assert window.start_seconds == 0.0  # clamped, would otherwise be -1.0
+    assert window.end_seconds == 3.0
+
+
+def test_peak_sample_window_falls_back_to_whole_interval_if_window_degenerates():
+    interval = Interval(start_seconds=0.0, end_seconds=0.0, peaks=[GlobalPeak(time_seconds=0.0, score=1.0)])
+    window = _peak_sample_window(interval, _cfg_with_window(4.0))
+    assert window.start_seconds == 0.0
+    assert window.end_seconds == 0.0
 
 
 def test_sanitize_caption_for_filename_strips_invalid_windows_chars():
