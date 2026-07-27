@@ -160,14 +160,22 @@ negative gap. A strategy's recall is how much of that union its own `TP`
 clips overlap. See [Limitations](#limitations) -- this is relative to what
 the whole batch found, not an independent ground truth.
 
-**`golden-score [--golden-events PATH]`** -- scores the *current*
-`--strategy`/config against a pre-built golden event set (exact
+**`golden-score [--golden-events PATH] [--vision]`** -- scores the
+*current* `--strategy`/config against a pre-built golden event set (exact
 ground-truth timestamps, see [golden.py](#round-3-results)) instead of a
 labeled batch-review round: audio-only, no clip rendering, no human
 review, just `detect` + compare against known timestamps. Default path is
 `testdata/golden_events.json`. Once a golden set exists for a recording,
 this is the fast path for re-checking any tuning change -- see
 [tuning.py](src/soccer_highlights/tuning.py).
+
+With `--vision`, also runs the Phase 2 vision refinement pass (see
+[Vision AI (Phase 2)](#vision-ai-phase-2)) over the audio-only intervals
+and prints its score alongside the audio-only one, so the two are
+directly comparable -- the go/no-go check for whether vision actually
+helps. Requires `vision.api_key_env` (default `ANTHROPIC_API_KEY`) to be
+set; calls the Claude API once per candidate window/gap, so unlike every
+other `golden-score` use it isn't free or instant.
 
 ## Detection strategies
 
@@ -317,6 +325,309 @@ recording. Getting past it (e.g. reliably catching the 3 quiet, far-side
 goals without also catching a lot more background noise) would need a
 different kind of signal, not another threshold sweep -- see
 [specs.md](specs.md)'s planned Phase 2 vision refinement.
+
+## Vision AI (Phase 2)
+
+Groundwork for the vision refinement specs.md's Phase 2 named, layered on
+top of the audio pipeline rather than replacing it. Targets the two
+confirmed, human-labeled audio failure modes from Round 3/4 directly
+(see [Limitations](#limitations)): practice shots / crowd chatter during
+breaks that sound like real action, and quiet far-side goals that never
+clear an audio threshold. Both are visually obvious even when barely
+audible, which audio-only detection structurally can't use.
+
+Provider is **Claude's vision API** (`anthropic` package) -- not the
+Google Video Intelligence / AWS Rekognition / GPT-4o options specs.md
+named. Google's shot/object/label detection doesn't answer "shot on
+target vs. practice shot" (that's not a label it produces); AWS
+Rekognition has no built-in "kicking"/"goal celebration" action class and
+would need a custom-trained model. Both also need async job/bucket
+plumbing (upload to cloud storage, poll an operation) this repo doesn't
+have. A direct vision-LLM prompt answers the actual semantic question in
+one synchronous call per candidate window/gap -- fits the existing
+"small script calls ffmpeg, does one thing" shape directly, and frames
+are always pulled from the `.LRF` proxy (never the full-res source), same
+reasoning as audio detection on this hardware.
+
+[`vision.py`](src/soccer_highlights/vision.py) runs two passes, both
+built on the same `Interval`/`GlobalPeak` primitives
+[`timeline.py`](src/soccer_highlights/timeline.py) already provides:
+
+- **Confirm**: for every audio-flagged interval, sample
+  `vision.frames_per_window` frames from a `vision.peak_window_seconds`
+  window CENTERED ON THE INTERVAL'S DETECTED PEAK (not spread evenly
+  across the whole clip -- see the 2026-07-25 finding below for why that
+  distinction mattered in practice) and ask whether they show real
+  in-play action or a false-positive-shaped moment (practice shot,
+  break-time chatter), plus a short factual caption. An interval is only
+  *dropped* on a false-positive verdict at or above
+  `vision.drop_confidence_threshold` -- recall-first, matching this
+  project's standing tuning priority: an uncertain or errored vision call
+  keeps the interval rather than risk discarding a real event.
+- **Scan**: for every gap no audio strategy flagged (`invert_intervals`,
+  same negative-space chunking `batch-review` already uses), sample
+  frames across it and ask whether a real event is visible anyway. A new
+  interval is only *added* on an event verdict at or above
+  `vision.add_confidence_threshold`, windowed with the same
+  `timeline.lookback_seconds`/`post_peak_seconds` a real audio peak
+  would get.
+
+Both passes return per-window verdicts (`VisionRunLog`) written to
+`vision_events.json` for spot-checking against real clips -- the same
+role `metadata.events_path` plays for audio.
+
+`soccer-highlights vision-highlights` runs confirm-only (no scan pass --
+see below) over a real audio-detect pass, renders survivors as
+`"{seconds} - caption.mp4"` (fast `cfg.review` renders by default,
+`--full-quality` for the real `cfg.export` 4K delivery encode once
+you trust the surviving timestamps), and archives pruned candidates in a
+`pruned/` subfolder for audit instead of deleting them.
+
+Pure decision logic (`_evenly_spaced_offsets`, `_parse_verdict_json`,
+`_peak_anchor_time`, `sanitize_caption_for_filename`, `decide_confirm`,
+`decide_scan`, `refine_with_vision`'s merge step) is unit-tested against
+injected/fake verdicts, no real API or ffmpeg calls in `pytest`, same
+split as `audio.py`/`clipping.py`/`render.py`.
+
+### Round 1 (vision): confirm+caption only marginally beats audio alone
+
+Tested against the real round-2 recording and `testdata/golden_events.json`
+on 2026-07-25, in two passes:
+
+1. **First pass** (whole-clip evenly-spaced frame sampling, the original
+   design): recall collapsed, 0.77 -> 0.23 (FN 3 -> 10). Root cause: a
+   real shot/strike is a sub-second transient; 5 frames spread across a
+   12-20s clip usually land just before/after the actual moment, so the
+   model confidently (0.75-0.85) misread real events as practice shots.
+   Fixed by anchoring frame sampling on the interval's detected peak time
+   (`_peak_anchor_time`) instead of spreading across the whole clip.
+2. **Second pass** (peak-anchored, loosened audio to `min_score=0.45`
+   first to test whether that recovered any additional recall -- it
+   didn't: FN stayed at 3, loosening past `min_score=0.55` just added
+   more false positives, confirming Round 3/4's finding again rather than
+   revealing anything new). Confirm+caption's actual effect, swept
+   offline against the cached verdicts (no extra API calls, same idea as
+   the audio `min_score` sweep):
+
+   | `drop_confidence_threshold` | kept | precision | recall | F1 | FN |
+   |---|---|---|---|---|---|
+   | (no filtering / audio-only) | 40/40 | 0.250 | 0.769 | 0.377 | 3 |
+   | 0.75 (current default) | 31/40 | 0.290 | 0.692 | 0.409 | 4 |
+   | 0.70 | 28/40 | 0.286 | 0.615 | 0.390 | 5 |
+   | 0.65 | 26/40 | 0.231 | 0.462 | 0.308 | 7 |
+   | <=0.60 | 9/40 | 0.222 | 0.154 | 0.182 | 11 |
+
+**Conclusion**: the current default (0.75) is the best value found, but
+"best" means +0.03 F1 over not running vision at all, at the cost of one
+more missed real event -- not the clear precision win Phase 2 set out to
+find. Below 0.70 it gets worse than doing nothing. The model's confidence
+score does not cleanly separate true from false positives in the 0.6-0.75
+band from a handful of low-res stills; peak-anchoring fixed the
+catastrophic recall bug but didn't turn this into a reliable classifier.
+
+### Round 2 (vision): provider/frame-density comparison infrastructure
+
+Built `vision_gemini.py` (Gemini native-video counterpart to Claude's
+stills-based confirm pass -- same peak-anchored sample window via the
+now-shared `vision._peak_sample_window`, same unmodified `_CONFIRM_PROMPT`
+for a fair first comparison, but sends one short video clip via
+`generateContent`'s `inline_data` instead of discrete stills) and
+`vision_eval.py` (a reusable, tested harness: `collect_verdicts` caches
+each classify call incrementally to `output/vision_compare/<tag>.json`
+so an interrupted run against a real paid API doesn't lose progress, and
+resumes automatically; `sweep_drop_threshold` scores the same cached
+verdicts at several thresholds, offline/free, same idea as the audio
+`min_score` sweep one layer up). Exposed via `soccer-highlights
+vision-compare --provider {claude,gemini} --tag LABEL` -- pure
+measurement, no rendering.
+
+Two results against the same 40 candidates (`min_score=0.45`,
+unmodified confirm prompt):
+
+- **Claude, denser frame sampling** (10 frames instead of 5, same 4s peak
+  window -- 2.5 FPS instead of 1.25 FPS): essentially no change at the
+  best threshold (F1 0.409, FN=4, identical to the 5-frame result).
+  Doubling frame density inside the same window doesn't move the needle
+  -- rules out "just sample more frames" as an easy fix; the earlier
+  confidence-calibration problem isn't simply frame starvation.
+- **Gemini, native video, same prompt**: initially blocked by the
+  free-tier quota (5 requests/minute, 20/day for `gemini-3.6-flash`) --
+  only 23/40 candidates got a real verdict before hitting
+  `RESOURCE_EXHAUSTED`. Also exposed a real bug in `collect_verdicts`:
+  it cached *every* attempt including failures, so "resuming" treated
+  the 17 rate-limited `None` results as permanently resolved instead of
+  retrying them -- fixed to only reuse cached *real* verdicts and retry
+  cached `None`s. After the user enabled billing on the key's Cloud
+  project and the fix landed, the complete 40/40 run:
+
+  | | kept | precision | recall | F1 | FN |
+  |---|---|---|---|---|---|
+  | Claude, stills, existing prompt | 31/40 | 0.290 | 0.692 | 0.409 | 4 |
+  | **Gemini, video, existing prompt** | 24/40 | 0.333 | 0.615 | **0.432** | 5 |
+
+  Gemini modestly beats Claude on F1 with the identical prompt, at the
+  cost of one more missed real event -- and it never hedges: every
+  verdict's confidence was >=0.80 (vs. Claude's mushy 0.4-0.75 band), so
+  the sweep table is flat across every threshold value tried.
+
+### Round 3 (vision): the "improved" prompt made both providers worse
+
+Added the two details requested for the confirm prompt: the camera's
+position (next to one goal, facing field center -- so the far goal is
+mostly not clearly visible) and a precise definition of "interesting
+moment" (goal / save / shot-on-target deflected by a defender / a shot
+that missed narrowly on its own -- explicitly excluding routine
+passes/practice/general play). Re-tested both providers against the
+same 40 candidates:
+
+| | kept | precision | recall | F1 | FN |
+|---|---|---|---|---|---|
+| Claude, improved prompt | 39/40 | 0.256 | 0.769 | 0.385 | 3 |
+| Gemini, improved prompt | 7/40 | 0.143 | 0.077 | **0.100** | 12 |
+
+Both got *worse*, not better -- mild for Claude, catastrophic for
+Gemini (missed 12 of 13 golden events). The captions show why: the
+stricter definition correctly rejects genuinely ambiguous "general
+play"/"routine pass" candidates the old looser prompt used to wrongly
+accept (e.g. old Gemini verdict `"Active match play with a shot or pass
+toward the goal area"` -> true; new: `"General play in midfield with no
+shot on goal"` -> false, more accurate) -- but it *also* rejects real
+golden events that don't unambiguously look like a clean goal/save/
+deflection/near-miss from a single ~4-second clip. The precision-focused
+rewrite traded away far more recall than intended, worst for the
+provider that was previously ahead. **Not adopted as the default** --
+kept as a documented negative result, not silently reverted, since it's
+informative: precision and recall from this classifier don't trade off
+smoothly, they can collapse together depending on how the prompt frames
+the decision.
+
+### Round 4 (vision): audio+video-aware prompt also regresses -- pattern holds
+
+Built `vision_gemini._AV_CONFIRM_PROMPT`: describes the input accurately
+as one continuous video clip (not "sampled frames") and explicitly asks
+the model to use the audio track already baked into the extracted clip
+(the ffmpeg cut always includes `-c:a aac`) -- listen for the ball-strike
+sound or crowd reaction alongside watching the video. Something Claude
+structurally cannot do (stills only), so a genuine Gemini-specific lever,
+built on the *original* prompt's structure (not Round 3's strict
+definition, which had already backfired) so audio-awareness gets tested
+as its own variable.
+
+| | kept | precision | recall | F1 | FN |
+|---|---|---|---|---|---|
+| Gemini, video only, original prompt | 24/40 | 0.333 | 0.615 | **0.432** | 5 |
+| Gemini, video + audio-aware prompt | 12/40 | 0.333 | 0.308 | 0.320 | 9 |
+
+Worse again, not better -- same precision, meaningfully worse recall
+(4 golden events covered instead of 8). **Third negative result in a
+row** with a consistent shape: Round 3's stricter visual definition and
+Round 4's joint audio+video correlation requirement both raise the bar
+for "count this as a real event," and both lose more recall than they
+gain precision. The plain, loose, original prompt -- describe the goal
+(shot/save/goal/crowd reaction to one) at a high level and let the model
+use whatever evidence it has -- remains the best configuration found in
+every round tried. `vision_gemini.classify_confirm`'s active default was
+reverted back to it; `_AV_CONFIRM_PROMPT` is kept in the module,
+documented, not used.
+
+**Overall conclusion across Rounds 1-4**: Gemini native video with the
+original prompt (F1=0.432, precision 0.333, recall 0.615) is the best
+result found, a real but modest improvement over audio alone (F1=0.377).
+Every attempted refinement -- denser Claude frames, a stricter event
+definition, audio-awareness -- made results worse, not better. Further
+prompt engineering along these same lines looks like it has diminishing
+(or negative) returns; a different lever (a stronger/different Gemini
+model, fundamentally different framing, or accepting Round 1's original
+scope of "cut the worst false positives, don't chase a perfect
+classifier") would be the next thing worth trying, not another prompt
+tweak in this family. This round stopped here deliberately rather than
+iterate further -- see git log.
+
+### Label audit: is the ground truth itself the bottleneck?
+
+Every round above measured against `testdata/golden_events.json`, which
+is itself derived from the Round 2 human-labeled dataset
+(`output/review/*`) via `golden.build_golden_events()` -- a fairly rough
+process (a TP's anchor time is just its strongest detected peak; most
+labeled rows have no descriptive note at all, just a bare verdict
+letter). Three straight rounds of prompt tuning failing to clearly beat
+audio alone raised an obvious question: is the AI the bottleneck, or are
+we tuning hard against imprecise labels?
+
+[`label_audit.py`](src/soccer_highlights/label_audit.py) checks this
+directly, without touching detection at all: for every already-labeled
+row across all of `output/review`'s sheets (strategy TP/FP clips +
+negative-space TN/FN gaps -- 96 rows total), Gemini watches the clip
+fresh (no verdict/notes shown to it) and writes a free-text scene
+description -- deliberately not a yes/no+confidence judgment, since
+that exact shape regressed three times in a row above. Claude then
+judges, from the human's verdict+notes and Gemini's description alone,
+whether they agree (`consistent` / `human_likely_wrong` /
+`ai_likely_wrong` / `ambiguous`, plus a 0-1 distance score). Rows the
+judge flags get an ultrafast/960px clip rendered for a human to actually
+watch, and every row -- flagged or not -- lands in one CSV
+(`label_audit_report.csv`) with the original label, the Gemini
+description, the judge's verdict, and two blank columns (`new_label`,
+`new_notes`) to record a revised label after watching.
+
+Run via `soccer-highlights label-audit [--limit N]` (the `--limit` flag
+exists specifically to smoke-test cheaply before committing to the full,
+multi-hour, real-API-cost run). Resumable by design -- results cache to
+`output/label_audit/audit_cache.json` incrementally, and a row with a
+cached description but no judge only retries the missing judge call,
+not both (this run needed it twice: interrupted first by the laptop
+going to sleep, then again by an unrelated overnight app closure --
+both times it picked up exactly where it left off with zero lost API
+spend).
+
+**First real run** (2026-07-26, 96 rows): 76 consistent, 15
+`ai_likely_wrong`, 5 `human_likely_wrong`. That ~21% flagged rate is
+itself informative -- it's roughly the same order of magnitude as the
+F1 gap every detection round above was fighting over, suggesting the
+golden set's own noise floor may be a real contributor to why three
+rounds of prompt tuning couldn't clearly move the needle. Human review
+of the flagged clips (via the delivered CSV + `flagged_clips/`) is the
+next step -- this tool surfaces disagreements for a person to adjudicate,
+it does not relabel anything itself.
+
+### Pre-labeling a brand-new recording
+
+`label-audit` re-checks *existing* labels; `soccer-highlights pre-label
+--out-dir DIR [--lrf-cache-dir DIR]` is for a recording that has none
+yet. It detects candidates, renders small/fast clips (640px/ultrafast --
+cheaper even than `label-audit`'s already-cheap tier, since this is
+meant to run quickly on a long, not-yet-tuned recording), generates a
+Gemini description for each with no judge step (there's no human label
+yet to compare against), and writes one `review_sheet.csv` +
+`events.json` in the same shape a `batch-review` strategy folder uses
+(clip_file/start/end/duration/max_peak_score/verdict/notes, verdict and
+notes left blank for a human to fill in) plus a bonus
+`gemini_description` column -- reuses `scoring.generate_review_sheet`
+directly, so the output is a drop-in `review_root` for `score`/
+`golden.build_golden_events` later if a golden set ever gets built from
+this recording.
+
+`--lrf-cache-dir` exists for an unreliable `--source-dir` (e.g. a
+network/cloud drive): chunk discovery still reads `source_dir`'s
+`.MP4` files (a small, fast ffprobe metadata read for duration), but
+every chunk's `.LRF` read -- the actual heavy audio-decode and clip-
+extraction work, both of which already prefer `.LRF` over the full-res
+source -- gets redirected to a same-named file in this local directory
+if one exists there. Built after real trouble getting this recording's
+audio to decode reliably at all (2026-07-26): ffmpeg intermittently
+failed with exit code `3221225794` / `0xC0000006`
+(`STATUS_IN_PAGE_ERROR`, a Windows I/O failure) reading `.LRF` files
+directly off a Google Drive folder the raw footage had just been
+uploaded to. Copying only the much-smaller `.LRF` proxies locally first
+(`robocopy source_dir cache_dir *.LRF /R:5 /W:15` -- robocopy's own
+retry logic matters here, the copy itself hit the same flakiness) and
+pointing `--lrf-cache-dir` at that copy was one of two contributing
+fixes; the other turned out to be an overloaded machine (see
+`extract_audio_samples`'s own retry logic in `audio.py`, and the
+project's memory notes on this hardware) -- most of the actual repeated
+failures during this session stopped once unrelated background load was
+cleared, independent of where the files lived. Kept both fixes since
+each addresses a real, separately-observed failure mode.
 
 ## Configuration reference
 

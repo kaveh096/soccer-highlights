@@ -121,10 +121,126 @@ class ReviewConfig:
     preset: str = "veryfast"
     threads: int = 4
     audio_bitrate_kbps: int = 128
+    # Downmixed to mono -- these are cheap, small review clips only meant
+    # for a quick true/false-positive judgment, not the sharing deliverable.
+    mono_audio: bool = True
     # Negative-space clips: gaps not covered by ANY strategy's candidate
     # intervals, chunked for review so nothing is silently missed.
     max_negative_clip_seconds: float = 120.0
     min_negative_clip_seconds: float = 8.0
+
+
+@dataclass
+class ExportConfig:
+    # Full-resolution, re-encoded (not stream-copied) delivery clips for
+    # sharing -- source footage here is 4K at ~120fps HEVC Main10, which
+    # is far more than needed for sharing and is exactly the combination
+    # (high fps + 10-bit + HEVC) that struggles to play on modest hardware
+    # and takes forever to upload. Re-encoding to a lower, standard frame
+    # rate and 8-bit H.264 at a quality-targeted (not fixed) bitrate fixes
+    # both without a visible quality drop.
+    dir: str = "output/export"
+    max_width: int = 3840
+    fps: float = 30.0
+    # x264 CRF is a quality target, not a fixed bitrate -- output bitrate
+    # adapts per scene. 18 is the standard "visually lossless" reference
+    # value for x264.
+    crf: int = 18
+    preset: str = "medium"
+    threads: int = 0  # 0 = let ffmpeg use all available cores
+    audio_bitrate_kbps: int = 192
+    # Preserve the source's original channel count -- this is the sharing
+    # deliverable, not a cheap review clip, so it should NOT be downmixed
+    # to mono (a bug in the first cut of this config: it was forced mono
+    # unconditionally, same as review clips, until caught 2026-07-25).
+    mono_audio: bool = False
+
+
+@dataclass
+class VisionConfig:
+    # Phase 2: off by default -- audio-only behavior is unchanged unless a
+    # caller explicitly opts in (see cli.py's `golden-score --vision`).
+    enabled: bool = False
+    model: str = "claude-sonnet-5"
+    api_key_env: str = "ANTHROPIC_API_KEY"
+    frames_per_window: int = 5
+    # Frames are always pulled from the .LRF proxy, never the full-res
+    # source -- same reasoning as audio detection: cheap, fast to decode
+    # on old hardware, and plenty of detail for a classification call.
+    frame_max_width: int = 640
+    # Confirm pass: frames are sampled from a window this wide, CENTERED ON
+    # THE INTERVAL'S PEAK TIME -- not spread across the whole (lookback +
+    # post_peak) clip. A real shot/strike is a sub-second transient; the
+    # first real-footage test (2026-07-25) showed even spacing across a
+    # 12-20s clip usually lands all sampled frames just before/after the
+    # actual moment, so the model confidently (0.75-0.85) misreads a real
+    # event as a practice shot -- recall collapsed 0.77->0.23. Anchoring on
+    # the known peak timestamp (already detected by audio) fixes this.
+    peak_window_seconds: float = 4.0
+    # Where `vision-highlights` writes its kept/pruned clips.
+    highlights_dir: str = "output/vision_highlights"
+    # Confirm pass: an audio-flagged interval is only DROPPED if vision
+    # reports a false positive at or above this confidence. Recall-first
+    # per the project's standing priority -- an uncertain or errored call
+    # keeps the interval rather than discarding a possibly-real event.
+    drop_confidence_threshold: float = 0.75
+    # Scan pass: a negative-space gap only gets a new synthesized interval
+    # if vision reports an event at or above this confidence.
+    add_confidence_threshold: float = 0.75
+    scan_chunk_max_seconds: float = 120.0
+    scan_chunk_min_seconds: float = 8.0
+    request_timeout_seconds: float = 60.0
+    max_retries: int = 2
+
+
+@dataclass
+class GeminiConfig:
+    # Gemini native-video counterpart to VisionConfig's Claude stills-based
+    # confirm pass -- for a direct comparison of "continuous video" vs.
+    # "discrete extracted frames" on the identical candidate set. Google's
+    # own docs confirm Gemini also subsamples video at 1 FPS by default, so
+    # this isn't a free win over frame extraction; it's a real experiment,
+    # not an assumed upgrade (see README's Vision AI section, 2026-07-25).
+    enabled: bool = False
+    model: str = "gemini-flash-latest"
+    api_key_env: str = "GEMINI_API_KEY"
+    # Same concept as VisionConfig.peak_window_seconds -- the short video
+    # clip sent to Gemini is cut from this window, centered on the
+    # interval's detected peak, so both providers see the identical time
+    # range for a fair comparison.
+    peak_window_seconds: float = 4.0
+    clip_max_width: int = 640
+    drop_confidence_threshold: float = 0.75
+    add_confidence_threshold: float = 0.75
+    request_timeout_seconds: float = 60.0
+    max_retries: int = 2
+
+
+@dataclass
+class LabelAuditConfig:
+    # Re-checks the existing human-labeled Round 2 dataset (output/review/*)
+    # against a Gemini-generated free-text scene description, judged by
+    # Claude for agreement -- not another detection-tuning pass, an audit
+    # of whether the LABELS themselves hold up. See README's Vision AI
+    # section (Label Audit) for why this was worth doing: three straight
+    # rounds of prompt tuning against the existing golden set all failed
+    # to clearly improve on audio alone, raising the question of whether
+    # the ground truth itself needs a second look before tuning further.
+    review_root: str = "output/review"
+    output_dir: str = "output/label_audit"
+    # Deliberately cheaper than ReviewConfig -- this is a "generate in a
+    # few hours" audit pass over the flagged subset, not a real review
+    # round; nobody needs to watch these more than once.
+    render_max_width: int = 960
+    render_fps: float = 24.0
+    render_crf: int = 30
+    render_preset: str = "ultrafast"
+    render_threads: int = 4
+    render_audio_bitrate_kbps: int = 96
+    render_mono_audio: bool = True
+    # A row gets a rendered clip for human review if the judge's agreement
+    # isn't "consistent" or its distance_score is at least this high.
+    flag_distance_threshold: float = 0.5
 
 
 @dataclass
@@ -136,6 +252,10 @@ class Config:
     output: OutputConfig = field(default_factory=OutputConfig)
     metadata: MetadataConfig = field(default_factory=MetadataConfig)
     review: ReviewConfig = field(default_factory=ReviewConfig)
+    export: ExportConfig = field(default_factory=ExportConfig)
+    vision: VisionConfig = field(default_factory=VisionConfig)
+    gemini: GeminiConfig = field(default_factory=GeminiConfig)
+    label_audit: LabelAuditConfig = field(default_factory=LabelAuditConfig)
 
 
 def _apply_dict(obj: Any, data: dict[str, Any]) -> None:
