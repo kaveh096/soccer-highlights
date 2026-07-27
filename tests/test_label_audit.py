@@ -9,6 +9,7 @@ from soccer_highlights.label_audit import (
     is_flagged,
     parse_review_sheet_rows,
     run_audit,
+    run_describe_only,
     sort_by_disagreement,
     write_report_csv,
 )
@@ -171,3 +172,57 @@ def test_write_report_csv_includes_blank_new_label_columns(tmp_path):
     assert "new_notes" in content
     assert "a description" in content
     assert content.strip().endswith(",")  # last two columns (new_label, new_notes) are blank
+
+
+def test_run_describe_only_calls_describe_for_every_row_no_judge(tmp_path):
+    rows = [_row(clip="clip_001.mp4"), _row(clip="clip_002.mp4")]
+    describe_calls = []
+
+    def fake_describe(row, chunks, cfg):
+        describe_calls.append(row.clip_file)
+        return f"description for {row.clip_file}"
+
+    cache_path = tmp_path / "descriptions.json"
+    results = run_describe_only(rows, chunks=[], gemini_cfg=None, cache_path=cache_path, describe_fn=fake_describe)
+
+    assert describe_calls == ["clip_001.mp4", "clip_002.mp4"]
+    assert results == ["description for clip_001.mp4", "description for clip_002.mp4"]
+    assert cache_path.exists()
+
+
+def test_run_describe_only_resumes_and_retries_only_failed_entries(tmp_path):
+    rows = [_row(clip="clip_001.mp4"), _row(clip="clip_002.mp4")]
+    cache_path = tmp_path / "descriptions.json"
+    cache_path.write_text(
+        json.dumps(
+            [
+                {"strategy": "strike_loose", "clip_file": "clip_001.mp4", "start_seconds": 0.0, "end_seconds": 10.0, "description": "already done"},
+                {"strategy": "strike_loose", "clip_file": "clip_002.mp4", "start_seconds": 0.0, "end_seconds": 10.0, "description": None},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    describe_calls = []
+
+    def fake_describe(row, chunks, cfg):
+        describe_calls.append(row.clip_file)
+        return "freshly described"
+
+    results = run_describe_only(rows, chunks=[], gemini_cfg=None, cache_path=cache_path, describe_fn=fake_describe)
+
+    assert describe_calls == ["clip_002.mp4"]  # only the previously-failed one was retried
+    assert results == ["already done", "freshly described"]
+
+
+def test_run_describe_only_detects_cache_mismatch(tmp_path):
+    rows = [_row(clip="clip_999.mp4")]
+    cache_path = tmp_path / "descriptions.json"
+    cache_path.write_text(
+        json.dumps([{"strategy": "strike_loose", "clip_file": "clip_001.mp4", "start_seconds": 0.0, "end_seconds": 10.0, "description": "x"}]),
+        encoding="utf-8",
+    )
+    try:
+        run_describe_only(rows, chunks=[], gemini_cfg=None, cache_path=cache_path, describe_fn=lambda r, c, g: "y")
+        assert False, "expected a cache mismatch error"
+    except ValueError:
+        pass

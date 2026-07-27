@@ -590,6 +590,45 @@ of the flagged clips (via the delivered CSV + `flagged_clips/`) is the
 next step -- this tool surfaces disagreements for a person to adjudicate,
 it does not relabel anything itself.
 
+### Pre-labeling a brand-new recording
+
+`label-audit` re-checks *existing* labels; `soccer-highlights pre-label
+--out-dir DIR [--lrf-cache-dir DIR]` is for a recording that has none
+yet. It detects candidates, renders small/fast clips (640px/ultrafast --
+cheaper even than `label-audit`'s already-cheap tier, since this is
+meant to run quickly on a long, not-yet-tuned recording), generates a
+Gemini description for each with no judge step (there's no human label
+yet to compare against), and writes one `review_sheet.csv` +
+`events.json` in the same shape a `batch-review` strategy folder uses
+(clip_file/start/end/duration/max_peak_score/verdict/notes, verdict and
+notes left blank for a human to fill in) plus a bonus
+`gemini_description` column -- reuses `scoring.generate_review_sheet`
+directly, so the output is a drop-in `review_root` for `score`/
+`golden.build_golden_events` later if a golden set ever gets built from
+this recording.
+
+`--lrf-cache-dir` exists for an unreliable `--source-dir` (e.g. a
+network/cloud drive): chunk discovery still reads `source_dir`'s
+`.MP4` files (a small, fast ffprobe metadata read for duration), but
+every chunk's `.LRF` read -- the actual heavy audio-decode and clip-
+extraction work, both of which already prefer `.LRF` over the full-res
+source -- gets redirected to a same-named file in this local directory
+if one exists there. Built after real trouble getting this recording's
+audio to decode reliably at all (2026-07-26): ffmpeg intermittently
+failed with exit code `3221225794` / `0xC0000006`
+(`STATUS_IN_PAGE_ERROR`, a Windows I/O failure) reading `.LRF` files
+directly off a Google Drive folder the raw footage had just been
+uploaded to. Copying only the much-smaller `.LRF` proxies locally first
+(`robocopy source_dir cache_dir *.LRF /R:5 /W:15` -- robocopy's own
+retry logic matters here, the copy itself hit the same flakiness) and
+pointing `--lrf-cache-dir` at that copy was one of two contributing
+fixes; the other turned out to be an overloaded machine (see
+`extract_audio_samples`'s own retry logic in `audio.py`, and the
+project's memory notes on this hardware) -- most of the actual repeated
+failures during this session stopped once unrelated background load was
+cleared, independent of where the files lived. Kept both fixes since
+each addresses a real, separately-observed failure mode.
+
 ## Configuration reference
 
 `config/default.yaml`:
