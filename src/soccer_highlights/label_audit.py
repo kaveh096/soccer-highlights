@@ -293,6 +293,54 @@ def run_audit(
     return results
 
 
+def run_describe_only(
+    rows: list[LabeledRow],
+    chunks: list[Chunk],
+    gemini_cfg: GeminiConfig,
+    cache_path: Path,
+    describe_fn: DescribeFn | None = None,
+) -> list[str | None]:
+    """Generate a Gemini description for every row with no judge step --
+    for fresh, not-yet-labeled candidates (e.g. a brand-new game's
+    audio-flagged clips), not an audit of an existing label. Resumable
+    the same way run_audit is: a cached description is reused, a cached
+    `null` (failed attempt) is retried."""
+    describe_fn = describe_fn or generate_description
+
+    cached: list[dict] = []
+    if cache_path.exists():
+        with open(cache_path, encoding="utf-8") as f:
+            cached = json.load(f)
+    entries: list[dict | None] = list(cached) + [None] * max(0, len(rows) - len(cached))
+
+    results: list[str | None] = []
+    for i, row in enumerate(rows):
+        entry = entries[i]
+        if entry is not None and (entry["strategy"] != row.strategy or entry["clip_file"] != row.clip_file):
+            raise ValueError(
+                f"Cache mismatch at index {i}: cached {entry['strategy']}/{entry['clip_file']}, "
+                f"actual {row.strategy}/{row.clip_file}. Delete {cache_path} and rerun."
+            )
+
+        description = entry.get("description") if entry else None
+        if description is None:
+            description = describe_fn(row, chunks, gemini_cfg)
+
+        results.append(description)
+        entries[i] = {
+            "strategy": row.strategy,
+            "clip_file": row.clip_file,
+            "start_seconds": round(row.interval.start_seconds, 2),
+            "end_seconds": round(row.interval.end_seconds, 2),
+            "description": description,
+        }
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(entries[: i + 1], f, indent=2)
+
+    return results
+
+
 def write_report_csv(audit_rows: list[AuditRow], out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", newline="", encoding="utf-8") as f:

@@ -58,11 +58,19 @@ Subcommands:
                   description, judge verdict, and two blank columns for
                   you to fill in a revised label/notes. See
                   label_audit.py and README's Vision AI section.
+  pre-label     - for a BRAND-NEW, not-yet-labeled recording: detect
+                  candidates, render small/fast clips, generate a
+                  Gemini description for each (no judge step -- there's
+                  no prior human label yet), and write a fillable
+                  review_sheet.csv (+events.json) in the same
+                  batch-review-compatible shape, plus a bonus
+                  gemini_description column, for a first labeling pass.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import tempfile
 from pathlib import Path
@@ -74,7 +82,7 @@ from soccer_highlights.detection import analyze
 from soccer_highlights.discovery import Chunk, discover_chunks
 from soccer_highlights.golden import GoldenScore, load_golden_events, score_intervals_against_golden
 from soccer_highlights.metadata import ChunkTrace, plot_debug, write_events_json
-from soccer_highlights.scoring import format_score_report, generate_all_review_sheets, score_all
+from soccer_highlights.scoring import format_score_report, generate_all_review_sheets, generate_review_sheet, score_all
 from soccer_highlights.timeline import (
     GlobalPeak,
     Interval,
@@ -488,6 +496,87 @@ def cmd_label_audit(cfg: Config, limit: int | None) -> None:
     print(f"Wrote {len(flagged)} flagged clip(s) to {clips_dir}")
 
 
+def cmd_pre_label(cfg: Config, out_dir: str, lrf_cache_dir: str | None = None) -> None:
+    """Detect candidates in a brand-new (not-yet-labeled) recording,
+    render small/fast clips, generate a Gemini description for each (no
+    judge step -- there's no prior human label yet to compare against),
+    and produce a fillable review_sheet.csv + events.json in the same
+    shape batch-review's per-strategy folders use (clip_file/start/end/
+    duration/max_peak_score/verdict/notes, verdict+notes left blank),
+    plus one bonus gemini_description column. Staying in that shape
+    keeps this compatible with score/golden.build_golden_events later if
+    a golden set ever gets built from it -- see label_audit.py for the
+    describe-only pass this reuses.
+
+    With --lrf-cache-dir: chunk discovery/duration-probing still reads
+    source_dir's .MP4 files (a small, fast metadata-only ffprobe read),
+    but every chunk's .lrf_path is redirected to a same-named file in
+    lrf_cache_dir if one exists there -- so the actual heavy reads
+    (audio decode, clip/frame extraction, all of which already prefer
+    .LRF over the full-res source) hit a local copy instead of
+    source_dir. Built for source_dir on an unreliable network/cloud
+    drive (observed in practice: ffmpeg failing with 3221225794 /
+    0xC0000006 STATUS_IN_PAGE_ERROR reading a freshly-uploaded Google
+    Drive file) -- copy just the much-smaller .LRF proxies locally
+    (e.g. via `robocopy source_dir lrf_cache_dir *.LRF /R:5 /W:15`,
+    which has its own retry logic) rather than the full-res source."""
+    if not os.environ.get(cfg.gemini.api_key_env):
+        raise SystemExit(f"pre-label requires {cfg.gemini.api_key_env} to be set (for Gemini descriptions).")
+
+    chunks = discover_chunks(cfg.input.source_dir)
+    if lrf_cache_dir:
+        cache_dir = Path(lrf_cache_dir)
+        for chunk in chunks:
+            if chunk.lrf_path is not None:
+                local_lrf = cache_dir / chunk.lrf_path.name
+                if local_lrf.exists():
+                    chunk.lrf_path = local_lrf
+                else:
+                    print(f"WARNING: no local LRF cache for {chunk.lrf_path.name} in {cache_dir}, using {chunk.lrf_path}")
+    merged, _traces = _run_detection(cfg, chunks)
+
+    strategy_dir = Path(out_dir) / "candidates"
+    strategy_dir.mkdir(parents=True, exist_ok=True)
+    write_events_json(merged, strategy_dir / "events.json")
+
+    # Small/fast clips -- deliberately cheaper than a normal review round
+    # (ReviewConfig's 1280px/veryfast default), since this is meant to be
+    # generated quickly for a first labeling pass on a long recording.
+    review_cfg = ReviewConfig(
+        max_width=640, fps=24.0, crf=30, preset="ultrafast", threads=4, audio_bitrate_kbps=96, mono_audio=True
+    )
+    with tempfile.TemporaryDirectory(prefix="soccer_hl_pre_label_") as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        for i, interval in enumerate(merged, start=1):
+            clip_path = strategy_dir / f"clip_{i:03d}.mp4"
+            print(f"Rendering {i}/{len(merged)}: {clip_path.name}")
+            slices = map_interval_to_chunks(interval, chunks)
+            render.render_review_clip(slices, clip_path, tmp_dir, review_cfg)
+
+    rows = [
+        label_audit.LabeledRow(
+            strategy="candidates", clip_file=f"clip_{i:03d}.mp4", interval=interval, verdict="", notes=""
+        )
+        for i, interval in enumerate(merged, start=1)
+    ]
+    cache_path = strategy_dir / "descriptions_cache.json"
+    print(f"\nGenerating {len(rows)} Gemini description(s) (cache: {cache_path})...")
+    descriptions = label_audit.run_describe_only(rows, chunks, cfg.gemini, cache_path)
+
+    sheet_path = generate_review_sheet(strategy_dir)
+    with open(sheet_path, encoding="utf-8") as f:
+        sheet_rows = list(csv.DictReader(f))
+    fieldnames = list(sheet_rows[0].keys()) + ["gemini_description"] if sheet_rows else []
+    for sheet_row, description in zip(sheet_rows, descriptions):
+        sheet_row["gemini_description"] = description or ""
+    with open(sheet_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(sheet_rows)
+
+    print(f"\nWrote {len(merged)} candidate clip(s) + {sheet_path} to {strategy_dir}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sunday Soccer Highlights Engine")
     parser.add_argument("--config", type=str, default=None, help="Path to a config YAML file (default: config/default.yaml)")
@@ -564,6 +653,20 @@ def main() -> None:
     label_audit_parser.add_argument(
         "--limit", type=int, default=None, help="Only process the first N labeled rows (for a quick smoke test)"
     )
+    pre_label_parser = subparsers.add_parser(
+        "pre-label",
+        help="Detect candidates in a brand-new recording, render small/fast clips, generate a Gemini "
+        "description for each, and write a fillable review_sheet.csv (+events.json) for a first labeling pass",
+    )
+    pre_label_parser.add_argument(
+        "--out-dir", required=True, help="Where to write events.json/clips/review_sheet.csv, e.g. a game's Tests folder"
+    )
+    pre_label_parser.add_argument(
+        "--lrf-cache-dir",
+        default=None,
+        help="Redirect heavy .LRF reads to a local copy in this directory (source_dir's .MP4 files are still "
+        "used for chunk discovery/duration, a small fast read) -- for an unreliable network/cloud source_dir",
+    )
 
     args = parser.parse_args()
     cfg = load_config(args.config)
@@ -592,6 +695,8 @@ def main() -> None:
         cmd_vision_compare(cfg, args.provider, args.tag, args.golden_events)
     elif args.command == "label-audit":
         cmd_label_audit(cfg, args.limit)
+    elif args.command == "pre-label":
+        cmd_pre_label(cfg, args.out_dir, args.lrf_cache_dir)
 
 
 if __name__ == "__main__":
