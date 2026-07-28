@@ -566,9 +566,11 @@ def cmd_pre_label(cfg: Config, out_dir: str, lrf_cache_dir: str | None = None) -
     sheet_path = generate_review_sheet(strategy_dir)
     with open(sheet_path, encoding="utf-8") as f:
         sheet_rows = list(csv.DictReader(f))
-    fieldnames = list(sheet_rows[0].keys()) + ["gemini_description"] if sheet_rows else []
+    fieldnames = list(sheet_rows[0].keys()) + ["gemini_score", "gemini_caption", "gemini_description"] if sheet_rows else []
     for sheet_row, description in zip(sheet_rows, descriptions):
-        sheet_row["gemini_description"] = description or ""
+        sheet_row["gemini_score"] = description.score if description else ""
+        sheet_row["gemini_caption"] = description.caption if description else ""
+        sheet_row["gemini_description"] = description.description if description else ""
     with open(sheet_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()

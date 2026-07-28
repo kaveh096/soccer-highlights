@@ -629,6 +629,54 @@ failures during this session stopped once unrelated background load was
 cleared, independent of where the files lived. Kept both fixes since
 each addresses a real, separately-observed failure mode.
 
+### Describe-prompt revision: a 1-5 highlight-worthiness score
+
+The first real `label-audit` run (2026-07-26, 96 rows) flagged ~21% of
+rows for disagreement -- reviewing them, most weren't perception
+failures (the AI seeing something wrong), they were definitional: the
+free-text prompt's notion of "highlight-worthy" didn't match what the
+user actually wants for picking reel clips. Revised `_DESCRIBE_PROMPT`
+(shared by both `label-audit` and `pre-label`, since both call the same
+`generate_description`) accordingly:
+
+- **Removed** over-specific details that vary game to game (exact
+  player count, field size/type).
+- **Added** details that don't vary: this is a Sunday morning
+  recreational game between Persian middle-aged men in California,
+  teams distinguished by white vs. dark/colored t-shirts, camera fixed
+  next to one goal facing the field center.
+- **Replaced** the free-form highlight-worthy/not judgment with a fixed
+  1-5 ordinal scale, since the actual downstream use is *ranking and
+  picking* clips (usually the top ~10 per match), not a binary filter:
+  1=no game action, 2=casual play, 3=near-miss/deflection or an unclear
+  far-side goal (not usable as a highlight even if exciting-sounding,
+  since it can't be clearly shown), 4=any clear goal OR truly
+  exceptional non-goal skill, 5=exceptional skill that also scores.
+  **Deliberate, confirmed design choices, not defaults**: a goal always
+  outranks a non-goal regardless of skill (only a truly exceptional
+  non-goal moment reaches tier 4 at all) -- "the viewers are the players
+  themselves, a goal is better than not a goal, even an easy one"; and
+  the entire 4-vs-5 boundary is purely outcome (goal or not), not skill
+  quality -- "goal matters, skill follows." Both were pushed back on
+  during design and explicitly reaffirmed, not overlooked.
+- Output schema is now `{"score": 1-5, "caption": ..., "description":
+  ..., "rationale": ...}` -- both the short filename-safe caption (for
+  eventual automated posting) and the original 2-4 sentence description
+  (still needed for labeling) are kept, not traded off against each
+  other. `_JUDGE_PROMPT` now also sees the numeric score, not just the
+  free-text description, when judging agreement with a human label.
+
+**Not yet validated against real footage** as of this revision --
+changing four things at once (removed specificity, added context, a
+restructured 1-5 output, camera position) risks the same
+attribution problem as the vision.py prompt rounds, but a full
+per-variable ablation isn't planned here (diminishing returns for a
+hobby project, per explicit user call). The planned sanity check:
+re-run `label-audit` against the already-hand-labeled Jul-19 dataset
+and see whether the scores line up with the existing human verdicts
+before trusting it on a fresh, unlabeled game -- see the project's
+memory notes for whether this happened yet and what it found.
+
 ## Configuration reference
 
 `config/default.yaml`:
