@@ -53,10 +53,11 @@ from soccer_highlights.vision_gemini import _call_gemini, _extract_peak_clip
 _DESCRIBE_PROMPT = """You are analyzing a short video clip (with audio) from a Sunday morning recreational soccer game -- a group of Persian middle-aged men playing a friendly match in California. One team wears white t-shirts, the other wears dark/colored t-shirts. The camera is fixed next to one goal, facing the center of the field -- action at this end is clearly visible, the far end usually is not. This clip is {duration:.1f} seconds long.
 
 Rate how highlight-worthy this clip is on this exact 1-5 scale (pick the single number that fits best -- do not invent in-between values):
+
 1 = No game action: a break, warm-up, or setup/idle time.
 2 = Casual in-play action: passing, dribbling, no shot attempt.
-3 = A shot on target that missed narrowly or was deflected by the keeper/defense; OR a likely goal (usually at the far end) that wasn't clearly visible from this camera. Even if it sounds exciting (cheering, shouting), it is NOT usable as a highlight clip if you can't clearly see it happen.
-4 = A clear, unambiguous goal at this end of the field (any goal counts, even a simple/easy one); OR, if there was no goal, a moment of exceptional, highly skillful play (a dangerous dribble/passing sequence or acrobatic attempt) that was a serious scoring threat but didn't result in a goal (maybe won a corner).
+3 = A shot on target that missed narrowly or was deflected by the keeper/defense. OR a likely goal (usually at the far end) that wasn't clearly visible from this camera. Even if it sounds exciting (cheering, shouting), it is NOT usable as a highlight clip if you can't clearly see it happen.
+4 = A clear, unambiguous goal. Any goal counts, even a simple/easy one. OR, if there was no goal, a moment of exceptional, highly skillful play (a dangerous dribble/passing sequence or acrobatic attempt) that was a serious scoring threat but didn't result in a goal (maybe won a corner).
 5 = An exceptionally skillful, spectacular play that results in a clear goal at this end of the field -- the rare combination of both outcome AND skill.
 
 A goal always outranks a non-goal, no matter how skillful the non-goal play was -- only a truly exceptional (not just "good") non-goal moment reaches tier 4. Between tiers 4 and 5, the deciding factor is simply whether the ball went in.
