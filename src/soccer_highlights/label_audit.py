@@ -8,11 +8,25 @@ all failed to clearly beat audio alone against testdata/golden_events.json
 golden.build_golden_events(). Before assuming the AI is the bottleneck,
 this checks whether the labels are: for every already-labeled row (every
 strategy sheet's TP/FP clips, every negative-space TN/FN gap), Gemini
-watches the clip fresh (no verdict/notes shown to it) and writes a
-free-text scene description -- deliberately NOT a yes/no+confidence
-judgment, since three rounds of exactly that shape all regressed (see
-README). Claude then judges, from the human's verdict+notes and Gemini's
-description alone, whether they agree.
+watches the clip fresh (no verdict/notes shown to it) and rates it on a
+1-5 highlight-worthiness scale (see _DESCRIBE_PROMPT), plus a caption and
+a free-text description -- not a yes/no+confidence judgment, since three
+rounds of exactly that shape all regressed (see README). Claude then
+judges, from the human's verdict+notes and Gemini's score+description,
+whether they agree.
+
+The 1-5 scale (2026-07-27 revision, after the first real label-audit run
+on 2026-07-26 flagged ~21% of rows -- most disagreements traced back to
+what counts as "highlight-worthy" being underspecified, not a perception
+failure) replaces an earlier free-text-only version: over-specific game
+details (exact player count, field size) were dropped since they vary
+game to game, and stable context that doesn't vary (this is a Sunday
+morning recreational game between Persian middle-aged men in California,
+white vs. dark t-shirt teams, camera fixed next to one goal facing
+center) was added instead. A goal always outranks a non-goal regardless
+of skill (only a truly exceptional non-goal moment reaches tier 4); the
+4-vs-5 boundary is purely outcome (goal or not) -- both deliberate,
+confirmed choices, not defaults.
 
 This is a data-quality audit, not a detector -- the output is a ranked
 list of disagreements for a human to actually watch and decide on, not
@@ -36,28 +50,38 @@ from soccer_highlights.discovery import Chunk
 from soccer_highlights.timeline import Interval
 from soccer_highlights.vision_gemini import _call_gemini, _extract_peak_clip
 
-_DESCRIBE_PROMPT = """You are analyzing a short video clip (with audio) from a Sunday recreational soccer game (16-player, half-court). The camera is fixed near one goal, facing the field center -- action at this end is clearly visible, the far end of the field is not. This clip is {duration:.1f} seconds long.
+_DESCRIBE_PROMPT = """You are analyzing a short video clip (with audio) from a Sunday morning recreational soccer game -- a group of Persian middle-aged men playing a friendly match in California. One team wears white t-shirts, the other wears dark/colored t-shirts. The camera is fixed next to one goal, facing the center of the field -- action at this end is clearly visible, the far end usually is not. This clip is {duration:.1f} seconds long.
 
-This clip is being reviewed as part of building an automatic highlight-reel generator so the players' friends and family can watch the best moments after the game. The goal is to identify genuinely exciting, highlight-worthy moments -- goals, saves, shots on target, contested action near a goal, celebrations -- versus mundane stretches: players standing around, warm-ups, practice drills during a stoppage, routine passing with no shot, camera setup.
+Rate how highlight-worthy this clip is on this exact 1-5 scale (pick the single number that fits best -- do not invent in-between values):
+1 = No game action: a break, warm-up, or setup/idle time.
+2 = Casual in-play action: passing, dribbling, no shot attempt.
+3 = A shot on target that missed narrowly or was deflected by the keeper/defense; OR a likely goal (usually at the far end) that wasn't clearly visible from this camera. Even if it sounds exciting (cheering, shouting), it is NOT usable as a highlight clip if you can't clearly see it happen.
+4 = A clear, unambiguous goal at this end of the field (any goal counts, even a simple/easy one); OR, if there was no goal, a moment of exceptional, highly skillful play (a dangerous dribble/passing sequence or acrobatic attempt) that was a serious scoring threat but didn't result in a goal (maybe won a corner).
+5 = An exceptionally skillful, spectacular play that results in a clear goal at this end of the field -- the rare combination of both outcome AND skill.
 
-Describe what actually happens in this clip in 2-4 sentences. Mention both what you see and what you hear (ball-strike sounds, cheering, shouting). Be concrete and factual, and explicitly call out anything highlight-worthy if present -- or say plainly that nothing highlight-worthy happens, and describe what IS happening instead. Do not invent player names, jersey numbers, or the exact score unless clearly legible or audible.
+A goal always outranks a non-goal, no matter how skillful the non-goal play was -- only a truly exceptional (not just "good") non-goal moment reaches tier 4. Between tiers 4 and 5, the deciding factor is simply whether the ball went in.
+
+Also write:
+- a short, factual one-line caption suitable for use in a filename, describing only what's visibly/audibly confirmable (e.g. "Goal from close range, white team celebrates"). Do not invent player names, jersey numbers, or the exact score unless clearly legible/audible.
+- a 2-4 sentence description of what actually happens in the clip, mentioning both what you see and what you hear (ball-strike sounds, cheering, shouting).
 
 Respond with ONLY a single JSON object, no other text, no code fence:
-{{"description": "2-4 sentences describing what happens in this clip"}}"""
+{{"score": 1-5, "caption": "short factual caption", "description": "2-4 sentences describing what happens in this clip", "rationale": "one short sentence explaining the score"}}"""
 
-_JUDGE_PROMPT = """You are auditing ground-truth labels for a soccer-highlight-detection dataset. A human reviewer watched a short video clip and recorded a verdict and (optionally) a note. Separately, an AI model watched the same clip and wrote a free-text description, without seeing the human's verdict or note.
+_JUDGE_PROMPT = """You are auditing ground-truth labels for a soccer-highlight-detection dataset. A human reviewer watched a short video clip and recorded a verdict and (optionally) a note. Separately, an AI model watched the same clip and rated it on a 1-5 highlight-worthiness scale and wrote a free-text description, without seeing the human's verdict or note.
 
 Human verdict: {verdict}
 (TP = a real highlight-worthy moment was confirmed here; FP = flagged by an audio detector but not actually highlight-worthy; TN = correctly nothing happened in this audio-uncovered gap; FN = the human found a real highlight-worthy moment audio missed entirely.)
 Human's note (may be empty): {notes}
 
+AI's highlight-worthiness score (1=no action, 2=casual play, 3=near-miss or an unclear/far-side goal not usable as a highlight, 4=clear goal or exceptional non-goal skill, 5=exceptional skillful goal): {score}
 AI's description of the same clip: {description}
 
-Judge whether the AI's description is CONSISTENT with the human's verdict/note -- do they agree about whether something highlight-worthy (a goal, save, shot on target, or similar) happened in this clip?
-- "consistent": the AI's description and the human's verdict clearly agree.
-- "human_likely_wrong": the AI's description describes something highlight-worthy that the human's verdict says didn't happen (or vice versa), and the AI's account seems credible enough to warrant a second look at the human label.
-- "ai_likely_wrong": the human's verdict/note is specific and credible, and the AI's description seems to have missed or misdescribed what actually happened.
-- "ambiguous": genuinely unclear either way (e.g. an empty human note and a non-committal description).
+Judge whether the AI's assessment (score + description) is CONSISTENT with the human's verdict/note -- do they agree about whether something highlight-worthy (score 4 or 5) happened in this clip?
+- "consistent": the AI's assessment and the human's verdict clearly agree.
+- "human_likely_wrong": the AI's score/description describes something highlight-worthy that the human's verdict says didn't happen (or vice versa), and the AI's account seems credible enough to warrant a second look at the human label.
+- "ai_likely_wrong": the human's verdict/note is specific and credible, and the AI's score/description seems to have missed or misdescribed what actually happened.
+- "ambiguous": genuinely unclear either way (e.g. an empty human note and a middling AI score).
 
 Respond with ONLY a single JSON object, no other text, no code fence:
 {{"agreement": "consistent" | "human_likely_wrong" | "ai_likely_wrong" | "ambiguous", "distance_score": <0.0 (fully consistent) to 1.0 (flatly contradictory)>, "rationale": "one short sentence explaining the judgment"}}"""
@@ -73,6 +97,14 @@ class LabeledRow:
 
 
 @dataclass
+class DescribeResult:
+    score: int  # 1-5 highlight-worthiness, see _DESCRIBE_PROMPT
+    caption: str
+    description: str
+    rationale: str = ""
+
+
+@dataclass
 class JudgeVerdict:
     agreement: str
     distance_score: float
@@ -82,7 +114,7 @@ class JudgeVerdict:
 @dataclass
 class AuditRow:
     row: LabeledRow
-    description: str | None
+    description: DescribeResult | None
     judge: JudgeVerdict | None
 
 
@@ -114,7 +146,7 @@ def parse_review_sheet_rows(strategy: str, csv_rows: list[dict]) -> list[Labeled
     return rows
 
 
-def _parse_describe_json(raw_text: str) -> str:
+def _parse_describe_json(raw_text: str) -> DescribeResult:
     text = raw_text.strip()
     if text.startswith("```"):
         text = text.strip("`")
@@ -122,10 +154,16 @@ def _parse_describe_json(raw_text: str) -> str:
             text = text[4:]
         text = text.strip()
     data = json.loads(text)
+    score = int(data["score"])
+    if score not in (1, 2, 3, 4, 5):
+        raise ValueError(f"score out of [1, 5] range: {score}")
+    caption = str(data["caption"]).strip()
+    if not caption:
+        raise ValueError("empty caption")
     description = str(data["description"]).strip()
     if not description:
         raise ValueError("empty description")
-    return description
+    return DescribeResult(score=score, caption=caption, description=description, rationale=str(data.get("rationale", "")))
 
 
 def _parse_judge_json(raw_text: str) -> JudgeVerdict:
@@ -178,7 +216,7 @@ def load_review_rows(review_root: Path) -> list[LabeledRow]:
     return rows
 
 
-def generate_description(row: LabeledRow, chunks: list[Chunk], cfg: GeminiConfig) -> str | None:
+def generate_description(row: LabeledRow, chunks: list[Chunk], cfg: GeminiConfig) -> DescribeResult | None:
     import os
     import tempfile
 
@@ -200,7 +238,7 @@ def generate_description(row: LabeledRow, chunks: list[Chunk], cfg: GeminiConfig
         return None
 
 
-def judge_agreement(row: LabeledRow, description: str, cfg: VisionConfig) -> JudgeVerdict | None:
+def judge_agreement(row: LabeledRow, description: DescribeResult, cfg: VisionConfig) -> JudgeVerdict | None:
     import os
 
     import anthropic
@@ -211,7 +249,9 @@ def judge_agreement(row: LabeledRow, description: str, cfg: VisionConfig) -> Jud
 
     try:
         client = anthropic.Anthropic(api_key=api_key, timeout=cfg.request_timeout_seconds, max_retries=cfg.max_retries)
-        prompt = _JUDGE_PROMPT.format(verdict=row.verdict, notes=row.notes or "(none)", description=description)
+        prompt = _JUDGE_PROMPT.format(
+            verdict=row.verdict, notes=row.notes or "(none)", score=description.score, description=description.description
+        )
         response = client.messages.create(
             model=cfg.model, max_tokens=300, messages=[{"role": "user", "content": prompt}]
         )
@@ -222,11 +262,30 @@ def judge_agreement(row: LabeledRow, description: str, cfg: VisionConfig) -> Jud
         return None
 
 
-DescribeFn = Callable[[LabeledRow, list[Chunk], GeminiConfig], "str | None"]
-JudgeFn = Callable[[LabeledRow, str, VisionConfig], "JudgeVerdict | None"]
+DescribeFn = Callable[[LabeledRow, list[Chunk], GeminiConfig], "DescribeResult | None"]
+JudgeFn = Callable[[LabeledRow, DescribeResult, VisionConfig], "JudgeVerdict | None"]
 
 
-def _entry_from_result(row: LabeledRow, description: str | None, judge: JudgeVerdict | None) -> dict:
+def _describe_to_dict(description: DescribeResult | None) -> dict | None:
+    if description is None:
+        return None
+    return {
+        "score": description.score,
+        "caption": description.caption,
+        "description": description.description,
+        "rationale": description.rationale,
+    }
+
+
+def _describe_from_dict(data: dict | None) -> DescribeResult | None:
+    if data is None:
+        return None
+    return DescribeResult(
+        score=data["score"], caption=data["caption"], description=data["description"], rationale=data.get("rationale", "")
+    )
+
+
+def _entry_from_result(row: LabeledRow, description: DescribeResult | None, judge: JudgeVerdict | None) -> dict:
     return {
         "strategy": row.strategy,
         "clip_file": row.clip_file,
@@ -234,7 +293,7 @@ def _entry_from_result(row: LabeledRow, description: str | None, judge: JudgeVer
         "end_seconds": round(row.interval.end_seconds, 2),
         "verdict": row.verdict,
         "notes": row.notes,
-        "description": description,
+        "describe": _describe_to_dict(description),
         "judge": None
         if judge is None
         else {"agreement": judge.agreement, "distance_score": judge.distance_score, "rationale": judge.rationale},
@@ -275,7 +334,7 @@ def run_audit(
                 f"actual {row.strategy}/{row.clip_file}. Delete {cache_path} and rerun."
             )
 
-        description = entry.get("description") if entry else None
+        description = _describe_from_dict(entry.get("describe")) if entry else None
         judge_dict = entry.get("judge") if entry else None
         judge = JudgeVerdict(**judge_dict) if judge_dict else None
 
@@ -299,7 +358,7 @@ def run_describe_only(
     gemini_cfg: GeminiConfig,
     cache_path: Path,
     describe_fn: DescribeFn | None = None,
-) -> list[str | None]:
+) -> list[DescribeResult | None]:
     """Generate a Gemini description for every row with no judge step --
     for fresh, not-yet-labeled candidates (e.g. a brand-new game's
     audio-flagged clips), not an audit of an existing label. Resumable
@@ -313,7 +372,7 @@ def run_describe_only(
             cached = json.load(f)
     entries: list[dict | None] = list(cached) + [None] * max(0, len(rows) - len(cached))
 
-    results: list[str | None] = []
+    results: list[DescribeResult | None] = []
     for i, row in enumerate(rows):
         entry = entries[i]
         if entry is not None and (entry["strategy"] != row.strategy or entry["clip_file"] != row.clip_file):
@@ -322,7 +381,7 @@ def run_describe_only(
                 f"actual {row.strategy}/{row.clip_file}. Delete {cache_path} and rerun."
             )
 
-        description = entry.get("description") if entry else None
+        description = _describe_from_dict(entry.get("describe")) if entry else None
         if description is None:
             description = describe_fn(row, chunks, gemini_cfg)
 
@@ -332,7 +391,7 @@ def run_describe_only(
             "clip_file": row.clip_file,
             "start_seconds": round(row.interval.start_seconds, 2),
             "end_seconds": round(row.interval.end_seconds, 2),
-            "description": description,
+            "describe": _describe_to_dict(description),
         }
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         with open(cache_path, "w", encoding="utf-8") as f:
@@ -348,13 +407,15 @@ def write_report_csv(audit_rows: list[AuditRow], out_path: Path) -> None:
         writer.writerow(
             [
                 "strategy", "clip_file", "start_seconds", "end_seconds", "duration_seconds",
-                "original_verdict", "original_notes", "gemini_description",
+                "original_verdict", "original_notes",
+                "gemini_score", "gemini_caption", "gemini_description",
                 "judge_agreement", "judge_distance_score", "judge_rationale",
                 "new_label", "new_notes",
             ]
         )
         for ar in audit_rows:
             row = ar.row
+            desc = ar.description
             judge = ar.judge
             writer.writerow(
                 [
@@ -365,7 +426,9 @@ def write_report_csv(audit_rows: list[AuditRow], out_path: Path) -> None:
                     f"{row.interval.end_seconds - row.interval.start_seconds:.2f}",
                     row.verdict,
                     row.notes,
-                    ar.description or "",
+                    desc.score if desc else "",
+                    desc.caption if desc else "",
+                    desc.description if desc else "",
                     judge.agreement if judge else "",
                     f"{judge.distance_score:.2f}" if judge else "",
                     judge.rationale if judge else "",
