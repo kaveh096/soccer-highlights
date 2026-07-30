@@ -49,22 +49,24 @@ Subcommands:
                   same candidate set. See README's Vision AI section.
   label-audit   - audits the existing human-labeled Round 2 dataset
                   (output/review/*) instead of tuning detection further:
-                  Gemini writes a free-text scene description of every
-                  already-labeled clip (no verdict shown to it), Claude
-                  judges whether that description agrees with the
-                  original human verdict/notes. Renders ultrafast/1K
-                  clips only for flagged (disagreeing) rows, and writes
-                  a CSV with every row -- original label, Gemini
-                  description, judge verdict, and two blank columns for
-                  you to fill in a revised label/notes. See
-                  label_audit.py and README's Vision AI section.
+                  Gemini scores/describes every already-labeled clip (no
+                  verdict shown to it, reading the same clip file the
+                  human labeled -- no separate render), Claude judges
+                  whether that agrees with the original human verdict/
+                  notes. Copies flagged (disagreeing) rows' clips to
+                  flagged_clips/ for human review, and writes a CSV with
+                  every row -- original label, Gemini description, judge
+                  verdict, and two blank columns for you to fill in a
+                  revised label/notes. See label_audit.py and README's
+                  Vision AI section.
   pre-label     - for a BRAND-NEW, not-yet-labeled recording: detect
-                  candidates, render small/fast clips, generate a
-                  Gemini description for each (no judge step -- there's
-                  no prior human label yet), and write a fillable
-                  review_sheet.csv (+events.json) in the same
-                  batch-review-compatible shape, plus a bonus
-                  gemini_description column, for a first labeling pass.
+                  candidates, render clips at the shared review spec
+                  (cfg.review), generate a Gemini description for each
+                  from that same file (no judge step -- there's no prior
+                  human label yet), and write a fillable review_sheet.csv
+                  (+events.json) in the same batch-review-compatible
+                  shape, plus a bonus gemini_description column, for a
+                  first labeling pass.
 """
 
 from __future__ import annotations
@@ -72,12 +74,13 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
 from soccer_highlights import clipping, label_audit, render, vision, vision_eval, vision_gemini
 from soccer_highlights.audio import extract_audio_samples
-from soccer_highlights.config import Config, ReviewConfig, load_config, load_strategy_configs
+from soccer_highlights.config import Config, load_config, load_strategy_configs
 from soccer_highlights.detection import analyze
 from soccer_highlights.discovery import Chunk, discover_chunks
 from soccer_highlights.golden import GoldenScore, load_golden_events, score_intervals_against_golden
@@ -443,17 +446,17 @@ def cmd_label_audit(cfg: Config, limit: int | None) -> None:
     module docstring for why (three rounds of detection-prompt tuning all
     failed to beat audio alone against a golden set derived from these
     same labels, raising the question of whether the labels themselves
-    hold up). Gemini describes each clip fresh, Claude judges agreement
-    with the original verdict/notes, flagged (disagreeing) rows get an
-    ultrafast/low-res clip rendered for human review, and every row --
-    flagged or not -- lands in the final CSV with blank new_label/
-    new_notes columns to fill in."""
+    hold up). Gemini describes each clip fresh (reading the same clip file
+    the human labeled -- no separate re-render), Claude judges agreement
+    with the original verdict/notes, flagged (disagreeing) rows are copied
+    to flagged_clips/ for human review, and every row -- flagged or not --
+    lands in the final CSV with blank new_label/new_notes columns to fill
+    in."""
     if not os.environ.get(cfg.gemini.api_key_env):
         raise SystemExit(f"label-audit requires {cfg.gemini.api_key_env} to be set (for Gemini descriptions).")
     if not os.environ.get(cfg.vision.api_key_env):
         raise SystemExit(f"label-audit requires {cfg.vision.api_key_env} to be set (for the Claude judge).")
 
-    chunks = discover_chunks(cfg.input.source_dir)
     rows = label_audit.load_review_rows(Path(cfg.label_audit.review_root))
     if limit is not None:
         rows = rows[:limit]
@@ -461,34 +464,22 @@ def cmd_label_audit(cfg: Config, limit: int | None) -> None:
 
     out_dir = Path(cfg.label_audit.output_dir)
     cache_path = out_dir / "audit_cache.json"
-    results = label_audit.run_audit(rows, chunks, cfg.gemini, cfg.vision, cache_path)
+    results = label_audit.run_audit(rows, cfg.gemini, cfg.vision, cache_path)
 
     flagged = [ar for ar in results if label_audit.is_flagged(ar.judge, cfg.label_audit.flag_distance_threshold)]
     flagged = label_audit.sort_by_disagreement(flagged)
     print(f"\n{len(flagged)}/{len(results)} row(s) flagged for review (threshold={cfg.label_audit.flag_distance_threshold})")
 
-    review_cfg = ReviewConfig(
-        max_width=cfg.label_audit.render_max_width,
-        fps=cfg.label_audit.render_fps,
-        crf=cfg.label_audit.render_crf,
-        preset=cfg.label_audit.render_preset,
-        threads=cfg.label_audit.render_threads,
-        audio_bitrate_kbps=cfg.label_audit.render_audio_bitrate_kbps,
-        mono_audio=cfg.label_audit.render_mono_audio,
-    )
     clips_dir = out_dir / "flagged_clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="soccer_hl_label_audit_render_") as tmp_dir_str:
-        tmp_dir = Path(tmp_dir_str)
-        for i, ar in enumerate(flagged):
-            row = ar.row
-            score = ar.judge.distance_score if ar.judge else 1.0
-            agreement = ar.judge.agreement if ar.judge else "no_verdict"
-            clip_name = f"{i + 1:03d} - dist{score:.2f} - {agreement} - {row.strategy}_{Path(row.clip_file).stem}.mp4"
-            clip_path = clips_dir / clip_name
-            print(f"  Rendering {clip_path.name}")
-            slices = map_interval_to_chunks(row.interval, chunks)
-            render.render_review_clip(slices, clip_path, tmp_dir, review_cfg)
+    for i, ar in enumerate(flagged):
+        row = ar.row
+        score = ar.judge.distance_score if ar.judge else 1.0
+        agreement = ar.judge.agreement if ar.judge else "no_verdict"
+        clip_name = f"{i + 1:03d} - dist{score:.2f} - {agreement} - {row.strategy}_{Path(row.clip_file).stem}.mp4"
+        clip_path = clips_dir / clip_name
+        print(f"  Copying {clip_path.name}")
+        shutil.copy2(row.clip_path, clip_path)
 
     report_path = out_dir / "label_audit_report.csv"
     label_audit.write_report_csv(results, report_path)
@@ -539,29 +530,33 @@ def cmd_pre_label(cfg: Config, out_dir: str, lrf_cache_dir: str | None = None) -
     strategy_dir.mkdir(parents=True, exist_ok=True)
     write_events_json(merged, strategy_dir / "events.json")
 
-    # Small/fast clips -- deliberately cheaper than a normal review round
-    # (ReviewConfig's 1280px/veryfast default), since this is meant to be
-    # generated quickly for a first labeling pass on a long recording.
-    review_cfg = ReviewConfig(
-        max_width=640, fps=24.0, crf=30, preset="ultrafast", threads=4, audio_bitrate_kbps=96, mono_audio=True
-    )
+    # Shared spec (cfg.review) -- the same clip a human labels here is the
+    # exact file Gemini scores and, later, label-audit re-checks against.
+    # No bespoke lower-res tier: benchmarked at ~0.33x realtime on this
+    # laptop (2026-07-28), so a full candidate batch renders in minutes,
+    # not the hours that would justify a cheaper/lossier one-off tier.
     with tempfile.TemporaryDirectory(prefix="soccer_hl_pre_label_") as tmp_dir_str:
         tmp_dir = Path(tmp_dir_str)
         for i, interval in enumerate(merged, start=1):
             clip_path = strategy_dir / f"clip_{i:03d}.mp4"
             print(f"Rendering {i}/{len(merged)}: {clip_path.name}")
             slices = map_interval_to_chunks(interval, chunks)
-            render.render_review_clip(slices, clip_path, tmp_dir, review_cfg)
+            render.render_review_clip(slices, clip_path, tmp_dir, cfg.review)
 
     rows = [
         label_audit.LabeledRow(
-            strategy="candidates", clip_file=f"clip_{i:03d}.mp4", interval=interval, verdict="", notes=""
+            strategy="candidates",
+            clip_file=f"clip_{i:03d}.mp4",
+            clip_path=strategy_dir / f"clip_{i:03d}.mp4",
+            interval=interval,
+            verdict="",
+            notes="",
         )
         for i, interval in enumerate(merged, start=1)
     ]
     cache_path = strategy_dir / "descriptions_cache.json"
     print(f"\nGenerating {len(rows)} Gemini description(s) (cache: {cache_path})...")
-    descriptions = label_audit.run_describe_only(rows, chunks, cfg.gemini, cache_path)
+    descriptions = label_audit.run_describe_only(rows, cfg.gemini, cache_path)
 
     sheet_path = generate_review_sheet(strategy_dir)
     with open(sheet_path, encoding="utf-8") as f:

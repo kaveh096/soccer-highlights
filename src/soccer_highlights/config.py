@@ -121,9 +121,9 @@ class ReviewConfig:
     preset: str = "veryfast"
     threads: int = 4
     audio_bitrate_kbps: int = 128
-    # Downmixed to mono -- these are cheap, small review clips only meant
-    # for a quick true/false-positive judgment, not the sharing deliverable.
-    mono_audio: bool = True
+    # Stereo -- mono was measured to save no CPU/time (audio encode is
+    # negligible next to video), so no reason to downgrade it.
+    mono_audio: bool = False
     # Negative-space clips: gaps not covered by ANY strategy's candidate
     # intervals, chunked for review so nothing is silently missed.
     max_negative_clip_seconds: float = 120.0
@@ -132,15 +132,19 @@ class ReviewConfig:
 
 @dataclass
 class ExportConfig:
-    # Full-resolution, re-encoded (not stream-copied) delivery clips for
-    # sharing -- source footage here is 4K at ~120fps HEVC Main10, which
-    # is far more than needed for sharing and is exactly the combination
-    # (high fps + 10-bit + HEVC) that struggles to play on modest hardware
-    # and takes forever to upload. Re-encoding to a lower, standard frame
-    # rate and 8-bit H.264 at a quality-targeted (not fixed) bitrate fixes
-    # both without a visible quality drop.
+    # Re-encoded (not stream-copied) delivery clips for sharing -- source
+    # footage here is 4K HEVC Main10, which struggles to play on modest
+    # hardware and takes forever to upload. Re-encoding to a lower,
+    # standard frame rate and 8-bit H.264 at a quality-targeted (not
+    # fixed) bitrate fixes that without a visible quality drop.
+    # 2560px, not the source's native 3840: benchmarked on real 4K/10-bit
+    # HEVC footage on this laptop (2026-07-28) -- decoding the source
+    # dominates cost regardless of output width (2560px: ~10x realtime,
+    # 35MB/12s; 1920px: ~10.4x, near-identical since decode-bound; 3840px:
+    # ~21x realtime, 96MB/12s). 2K gives the same crf-18 quality target
+    # for social media at roughly half the time and disk of full 4K.
     dir: str = "output/export"
-    max_width: int = 3840
+    max_width: int = 2560
     fps: float = 30.0
     # x264 CRF is a quality target, not a fixed bitrate -- output bitrate
     # adapts per scene. 18 is the standard "visually lossless" reference
@@ -228,16 +232,14 @@ class LabelAuditConfig:
     # the ground truth itself needs a second look before tuning further.
     review_root: str = "output/review"
     output_dir: str = "output/label_audit"
-    # Deliberately cheaper than ReviewConfig -- this is a "generate in a
-    # few hours" audit pass over the flagged subset, not a real review
-    # round; nobody needs to watch these more than once.
-    render_max_width: int = 960
-    render_fps: float = 24.0
-    render_crf: int = 30
-    render_preset: str = "ultrafast"
-    render_threads: int = 4
-    render_audio_bitrate_kbps: int = 96
-    render_mono_audio: bool = True
+    # No separate render tier here anymore (2026-07-28) -- flagged rows
+    # are copied straight from the already-rendered ReviewConfig clip
+    # (the same file the human labeled and Gemini scored), not re-encoded
+    # at a third resolution. Benchmarked at ~0.33x realtime for
+    # ReviewConfig's 1280px/veryfast/crf23 on real LRF footage, so a full
+    # audit-scale batch (~50 min of source footage) renders in ~15-30
+    # minutes -- cheap enough that a separate lower-quality tier bought
+    # nothing but a second lossy re-encode of the same clip.
     # A row gets a rendered clip for human review if the judge's agreement
     # isn't "consistent" or its distance_score is at least this high.
     flag_distance_threshold: float = 0.5

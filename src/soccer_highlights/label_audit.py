@@ -32,9 +32,15 @@ This is a data-quality audit, not a detector -- the output is a ranked
 list of disagreements for a human to actually watch and decide on, not
 an automated relabeling. Pure decision logic (row parsing, response
 parsing, flagging/sorting) is unit-tested against injected data; the
-ffmpeg clip extraction and both API calls are not (same split as
-vision.py/vision_gemini.py) -- validate with `label-audit --limit N`
-against real footage first.
+API calls are not (same split as vision.py/vision_gemini.py) --
+validate with `label-audit --limit N` against real footage first.
+
+Describe/judge never render or extract a clip themselves (2026-07-28) --
+they read the clip file already rendered by render.render_review_clip
+(review, pre-label, or label-audit all point at the identical file for a
+given row), so a candidate is encoded exactly once and reused by every
+pass -- human review, Gemini scoring, and audit re-checking all watch
+the same bytes.
 """
 
 from __future__ import annotations
@@ -46,9 +52,8 @@ from pathlib import Path
 from typing import Callable
 
 from soccer_highlights.config import GeminiConfig, VisionConfig
-from soccer_highlights.discovery import Chunk
 from soccer_highlights.timeline import Interval
-from soccer_highlights.vision_gemini import _call_gemini, _extract_peak_clip
+from soccer_highlights.vision_gemini import _call_gemini
 
 _DESCRIBE_PROMPT = """You are analyzing a short video clip (with audio) from a Sunday morning recreational soccer game -- a group of Persian middle-aged men playing a friendly match in California. One team wears white t-shirts, the other wears dark/colored t-shirts. The camera is fixed next to one goal, facing the center of the field -- action at this end is clearly visible, the far end usually is not. This clip is {duration:.1f} seconds long.
 
@@ -63,8 +68,8 @@ Rate how highlight-worthy this clip is on this exact 1-5 scale (pick the single 
 A goal always outranks a non-goal, no matter how skillful the non-goal play was -- only a truly exceptional (not just "good") non-goal moment reaches tier 4. Between tiers 4 and 5, the deciding factor is simply whether the ball went in.
 
 Also write:
-- a short, factual one-line caption suitable for use in a filename, describing only what's visibly/audibly confirmable (e.g. "Goal from close range, white team celebrates"). Do not invent player names, jersey numbers, or the exact score unless clearly legible/audible.
-- a 2-4 sentence description of what actually happens in the clip, mentioning both what you see and what you hear (ball-strike sounds, cheering, shouting).
+- a short, factual one-line caption IN FARSI (Persian script), describing only what's visibly/audibly confirmable (e.g. equivalent of "Goal from close range, white team celebrates"). Do not invent player names, jersey numbers, or the exact score unless clearly legible/audible.
+- a 2-4 sentence description IN ENGLISH of what actually happens in the clip, mentioning both what you see and what you hear (ball-strike sounds, cheering, shouting).
 
 Respond with ONLY a single JSON object, no other text, no code fence:
 {{"score": 1-5, "caption": "short factual caption", "description": "2-4 sentences describing what happens in this clip", "rationale": "one short sentence explaining the score"}}"""
@@ -92,6 +97,7 @@ Respond with ONLY a single JSON object, no other text, no code fence:
 class LabeledRow:
     strategy: str  # e.g. "strike_loose", or "negatives"
     clip_file: str
+    clip_path: Path  # the already-rendered review clip -- describe reads this directly, never re-encodes
     interval: Interval
     verdict: str  # TP / FP / TN / FN
     notes: str
@@ -126,10 +132,13 @@ class AuditRow:
 _VALID_AGREEMENTS = {"consistent", "human_likely_wrong", "ai_likely_wrong", "ambiguous"}
 
 
-def parse_review_sheet_rows(strategy: str, csv_rows: list[dict]) -> list[LabeledRow]:
+def parse_review_sheet_rows(strategy: str, csv_rows: list[dict], strategy_dir: Path) -> list[LabeledRow]:
     """Turn already-loaded review_sheet.csv rows (csv.DictReader dicts)
     into LabeledRow objects. Skips rows with no verdict recorded yet
-    (blank -- not every row in a sheet is necessarily labeled)."""
+    (blank -- not every row in a sheet is necessarily labeled). clip_path
+    points at the clip file already rendered alongside the sheet (by
+    batch-review or pre-label) -- describe/judge read that file directly,
+    they never re-render."""
     rows: list[LabeledRow] = []
     for row in csv_rows:
         verdict = row["verdict"].strip().upper()
@@ -139,6 +148,7 @@ def parse_review_sheet_rows(strategy: str, csv_rows: list[dict]) -> list[Labeled
             LabeledRow(
                 strategy=strategy,
                 clip_file=row["clip_file"],
+                clip_path=strategy_dir / row["clip_file"],
                 interval=Interval(start_seconds=float(row["start_seconds"]), end_seconds=float(row["end_seconds"])),
                 verdict=verdict,
                 notes=row.get("notes", "").strip(),
@@ -213,29 +223,42 @@ def load_review_rows(review_root: Path) -> list[LabeledRow]:
         strategy = sheet_path.parent.name
         with open(sheet_path, encoding="utf-8") as f:
             csv_rows = list(csv.DictReader(f))
-        rows.extend(parse_review_sheet_rows(strategy, csv_rows))
+        rows.extend(parse_review_sheet_rows(strategy, csv_rows, sheet_path.parent))
     return rows
 
 
-def generate_description(row: LabeledRow, chunks: list[Chunk], cfg: GeminiConfig) -> DescribeResult | None:
+def generate_description(clip_path: Path, duration_seconds: float, cfg: GeminiConfig) -> DescribeResult | None:
+    """Score an already-rendered clip (the same file a human labels/labeled)
+    -- no ffmpeg extraction here anymore (2026-07-28): review, describe, and
+    audit all read the one canonical rendered clip instead of each encoding
+    their own copy at a different resolution.
+
+    fps=5 (2026-07-29): Gemini's own default is 1fps frame sampling, which
+    a 4-profile sweep against all 96 Jul-19 labeled rows (baseline vs
+    fps=5 vs media_resolution=HIGH vs both) found measurably worse than
+    overriding to 5fps alone -- F1 (score>=4 vs TP/FN ground truth) went
+    0.083 -> 0.250, roughly tripling both recall and precision. Combining
+    fps=5 with media_resolution=HIGH unexpectedly reverted close to
+    baseline (F1 0.095) -- the two don't compose, so HIGH is deliberately
+    NOT used. See Tests/label_audit_v2/sweep_comparison.csv on the Jul-19
+    game's Drive folder for the full per-clip breakdown. Some misses
+    (crowd-reaction-only cues with no visible action, e.g. clapping for an
+    off-camera goal; events near the tail of a long negative-space clip)
+    persisted across every profile tested -- not a sampling-density
+    problem, a genuine model limitation worth remembering before trying
+    this again."""
     import os
-    import tempfile
 
     api_key = os.environ.get(cfg.api_key_env)
     if not api_key:
         raise RuntimeError(f"{cfg.api_key_env} is not set -- see README's Vision AI section for setup")
 
     try:
-        with tempfile.TemporaryDirectory(prefix="soccer_hl_label_audit_") as tmp_dir_str:
-            clip_path = Path(tmp_dir_str) / "clip.mp4"
-            extracted = _extract_peak_clip(row.interval, chunks, cfg.clip_max_width, clip_path)
-            if extracted is None:
-                return None
-            prompt = _DESCRIBE_PROMPT.format(duration=row.interval.end_seconds - row.interval.start_seconds)
-            raw = _call_gemini(extracted, prompt, cfg, api_key)
-            return _parse_describe_json(raw)
+        prompt = _DESCRIBE_PROMPT.format(duration=duration_seconds)
+        raw = _call_gemini(clip_path, prompt, cfg, api_key, video_metadata={"fps": 5})
+        return _parse_describe_json(raw)
     except Exception as exc:
-        print(f"WARNING: describe failed for {row.strategy}/{row.clip_file}: {exc}")
+        print(f"WARNING: describe failed for {clip_path}: {exc}")
         return None
 
 
@@ -263,7 +286,7 @@ def judge_agreement(row: LabeledRow, description: DescribeResult, cfg: VisionCon
         return None
 
 
-DescribeFn = Callable[[LabeledRow, list[Chunk], GeminiConfig], "DescribeResult | None"]
+DescribeFn = Callable[[Path, float, GeminiConfig], "DescribeResult | None"]
 JudgeFn = Callable[[LabeledRow, DescribeResult, VisionConfig], "JudgeVerdict | None"]
 
 
@@ -303,7 +326,6 @@ def _entry_from_result(row: LabeledRow, description: DescribeResult | None, judg
 
 def run_audit(
     rows: list[LabeledRow],
-    chunks: list[Chunk],
     gemini_cfg: GeminiConfig,
     vision_cfg: VisionConfig,
     cache_path: Path,
@@ -340,7 +362,7 @@ def run_audit(
         judge = JudgeVerdict(**judge_dict) if judge_dict else None
 
         if description is None:
-            description = describe_fn(row, chunks, gemini_cfg)
+            description = describe_fn(row.clip_path, row.interval.end_seconds - row.interval.start_seconds, gemini_cfg)
         if description is not None and judge is None:
             judge = judge_fn(row, description, vision_cfg)
 
@@ -355,7 +377,6 @@ def run_audit(
 
 def run_describe_only(
     rows: list[LabeledRow],
-    chunks: list[Chunk],
     gemini_cfg: GeminiConfig,
     cache_path: Path,
     describe_fn: DescribeFn | None = None,
@@ -384,7 +405,7 @@ def run_describe_only(
 
         description = _describe_from_dict(entry.get("describe")) if entry else None
         if description is None:
-            description = describe_fn(row, chunks, gemini_cfg)
+            description = describe_fn(row.clip_path, row.interval.end_seconds - row.interval.start_seconds, gemini_cfg)
 
         results.append(description)
         entries[i] = {
