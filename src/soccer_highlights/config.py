@@ -246,6 +246,25 @@ class LabelAuditConfig:
 
 
 @dataclass
+class TelegramConfig:
+    # Posts final, hand-picked export clips to a Telegram group (Bot API
+    # sendVideo, direct HTTP call -- no SDK, matching this project's existing
+    # style of calling providers' REST APIs directly, see vision_gemini.py).
+    # Token/chat ID are read from env vars, never stored in config -- see
+    # README's Vision AI section's sibling setup note for how to create a
+    # bot via @BotFather and find a group's chat ID.
+    bot_token_env: str = "TELEGRAM_BOT_TOKEN"
+    chat_id_env: str = "TELEGRAM_CHAT_ID"
+    # Bot API's hard per-file limit for bot-uploaded video, regardless of
+    # method -- checked client-side before attempting an upload so a
+    # too-large file fails fast with a clear message instead of a confusing
+    # HTTP error partway through a slow upload.
+    max_file_size_mb: float = 50.0
+    request_timeout_seconds: float = 120.0
+    max_retries: int = 2
+
+
+@dataclass
 class Config:
     input: InputConfig = field(default_factory=InputConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
@@ -258,6 +277,7 @@ class Config:
     vision: VisionConfig = field(default_factory=VisionConfig)
     gemini: GeminiConfig = field(default_factory=GeminiConfig)
     label_audit: LabelAuditConfig = field(default_factory=LabelAuditConfig)
+    telegram: TelegramConfig = field(default_factory=TelegramConfig)
 
 
 def _apply_dict(obj: Any, data: dict[str, Any]) -> None:

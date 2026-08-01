@@ -9,7 +9,9 @@ golden.build_golden_events(). Before assuming the AI is the bottleneck,
 this checks whether the labels are: for every already-labeled row (every
 strategy sheet's TP/FP clips, every negative-space TN/FN gap), Gemini
 watches the clip fresh (no verdict/notes shown to it) and rates it on a
-1-5 highlight-worthiness scale (see _DESCRIBE_PROMPT), plus a caption and
+1-5 highlight-worthiness scale (see _DESCRIBE_PROMPT_V2, the current
+production prompt as of 2026-07-31 -- _DESCRIBE_PROMPT is the superseded
+v1, kept for reference), plus a caption and
 a free-text description -- not a yes/no+confidence judgment, since three
 rounds of exactly that shape all regressed (see README). Claude then
 judges, from the human's verdict+notes and Gemini's score+description,
@@ -74,6 +76,45 @@ Also write:
 Respond with ONLY a single JSON object, no other text, no code fence:
 {{"score": 1-5, "caption": "short factual caption", "description": "2-4 sentences describing what happens in this clip", "rationale": "one short sentence explaining the score"}}"""
 
+_DESCRIBE_PROMPT_V2 = """You are analyzing a short video clip (with audio) from a Sunday morning recreational soccer game -- a group of Persian middle-aged men playing a friendly match in California. One team wears white t-shirts, the other wears dark/colored t-shirts. The camera is fixed next to one goal, facing the center of the field -- action at this end is clearly visible, the far end usually is not. This clip is {duration:.1f} seconds long.
+
+Rate how highlight-worthy this clip is on this exact 1-5 scale (pick the single number that fits best -- do not invent in-between values):
+
+1 = No game action: a break, warm-up, practice, or setup/idle time.
+2 = Casual in-play action: passing, dribbling, or a low-threat/routine attempt -- including a soft shot the keeper collects with no real save required. No real danger created.
+3 = A real shot on target that created danger: it missed narrowly, was deflected by the keeper/defense, OR was actively saved by the goalkeeper (the keeper had to dive, jump, stretch, or react quickly to real pace or placement -- not a shot that arrived slowly or straight at them requiring no significant movement). OR a likely goal (usually at the far end) that wasn't clearly visible from this camera. Even if it sounds exciting (cheering, shouting), it is NOT usable as a highlight clip if you can't clearly see it happen.
+4 = A clear, unambiguous goal. Any goal counts, even a simple/easy one. OR, if there was no goal, a moment of highly skillful play (a dangerous dribble/passing sequence, a strong shot, or skillful teamwork) that was a serious scoring threat but didn't result in a goal (probably won a corner).
+5 = A skillful goal. Not an easy tap goal. A clear goal at this end of the field that demands cheering -- the combination of both outcome AND skill.
+
+A goal always outranks a non-goal of comparable skill, no matter how skillful the non-goal play was -- only a skillful (not just "good") non-goal moment reaches tier 4. Tier 4 has two distinct paths, each with only one of the two ingredients a 5 requires (a goal AND genuine skill): (a) an easy/simple goal -- it has the outcome but not the skill; or (b) a genuinely skillful attempt that did not result in a goal -- it has the skill but not the outcome. Tier 5 needs both together: a goal that was also skillful.
+
+Before finalizing, apply these checks in order:
+- If the ball clearly crosses the goal line at this (camera-side) end -- however it happened, however it looked -- the score CANNOT be 3 or lower; it must be at least 4. Tier 3's goal clause is ONLY for a goal you could NOT clearly see happen (typically far-side).
+- If your own description below indicates no discernible action beyond players standing, idle, walking, or chatting, the score MUST be 1.
+
+Write your answer in this order, so your score follows from your own observations rather than being picked independently:
+- goal_this_end: true if the ball clearly crosses the goal line at THIS (camera-side) end and you can see it happen; false otherwise (including a far-side/unclear goal, or no goal at all).
+- a 2-4 sentence description IN ENGLISH of what actually happens in the clip, mentioning both what you see and what you hear (ball-strike sounds, cheering, shouting).
+- a one-sentence rationale explaining which tier this matches and why, referencing your own description above.
+- the score (1-5), consistent with goal_this_end, the description, and the rationale above -- if goal_this_end is true, score must be >=4; if the description shows no discernible action, score must be 1.
+- a short, factual one-line caption IN FARSI (Persian script), describing only what's visibly/audibly confirmable (e.g. equivalent of "Goal from close range, white team celebrates"). Do not invent player names, jersey numbers, or the exact score unless clearly legible/audible. This will be used to share clips with players. So focus on interesting details and funny or sad moments, not generic scene descriptions.
+
+Respond with ONLY a single JSON object, no other text, no code fence:
+{{"goal_this_end": true or false, "description": "2-4 sentences describing what happens in this clip", "rationale": "one short sentence explaining the score, referencing the description", "score": 1-5, "caption": "short factual caption in Farsi"}}"""
+
+_DESCRIBE_RESPONSE_SCHEMA_V2 = {
+    "type": "OBJECT",
+    "properties": {
+        "goal_this_end": {"type": "BOOLEAN"},
+        "description": {"type": "STRING"},
+        "rationale": {"type": "STRING"},
+        "score": {"type": "INTEGER", "minimum": 1, "maximum": 5},
+        "caption": {"type": "STRING"},
+    },
+    "required": ["goal_this_end", "description", "rationale", "score", "caption"],
+    "property_ordering": ["goal_this_end", "description", "rationale", "score", "caption"],
+}
+
 _JUDGE_PROMPT = """You are auditing ground-truth labels for a soccer-highlight-detection dataset. A human reviewer watched a short video clip and recorded a verdict and (optionally) a note. Separately, an AI model watched the same clip and rated it on a 1-5 highlight-worthiness scale and wrote a free-text description, without seeing the human's verdict or note.
 
 Human verdict: {verdict}
@@ -105,10 +146,14 @@ class LabeledRow:
 
 @dataclass
 class DescribeResult:
-    score: int  # 1-5 highlight-worthiness, see _DESCRIBE_PROMPT
+    score: int  # 1-5 highlight-worthiness, see _DESCRIBE_PROMPT_V2
     caption: str
     description: str
     rationale: str = ""
+    # v2-prompt only (see _DESCRIBE_PROMPT_V2) -- None for v1 responses, which
+    # don't ask for this field. Lets a caller cheaply flag a categorical bug
+    # (goal_this_end=True but score<4) without re-reading the description.
+    goal_this_end: bool | None = None
 
 
 @dataclass
@@ -174,7 +219,14 @@ def _parse_describe_json(raw_text: str) -> DescribeResult:
     description = str(data["description"]).strip()
     if not description:
         raise ValueError("empty description")
-    return DescribeResult(score=score, caption=caption, description=description, rationale=str(data.get("rationale", "")))
+    goal_this_end = data.get("goal_this_end")
+    return DescribeResult(
+        score=score,
+        caption=caption,
+        description=description,
+        rationale=str(data.get("rationale", "")),
+        goal_this_end=bool(goal_this_end) if goal_this_end is not None else None,
+    )
 
 
 def _parse_judge_json(raw_text: str) -> JudgeVerdict:
@@ -227,7 +279,14 @@ def load_review_rows(review_root: Path) -> list[LabeledRow]:
     return rows
 
 
-def generate_description(clip_path: Path, duration_seconds: float, cfg: GeminiConfig) -> DescribeResult | None:
+def generate_description(
+    clip_path: Path,
+    duration_seconds: float,
+    cfg: GeminiConfig,
+    prompt_template: str | None = None,
+    fps: int = 10,
+    response_schema: dict | None = _DESCRIBE_RESPONSE_SCHEMA_V2,
+) -> DescribeResult | None:
     """Score an already-rendered clip (the same file a human labels/labeled)
     -- no ffmpeg extraction here anymore (2026-07-28): review, describe, and
     audit all read the one canonical rendered clip instead of each encoding
@@ -246,7 +305,40 @@ def generate_description(clip_path: Path, duration_seconds: float, cfg: GeminiCo
     off-camera goal; events near the tail of a long negative-space clip)
     persisted across every profile tested -- not a sampling-density
     problem, a genuine model limitation worth remembering before trying
-    this again."""
+    this again.
+
+    v2 prompt / fps=10 / schema-enforced (2026-07-31, superseding the above
+    as the production default): a 4-profile sweep against all 66 Jul-26
+    labeled rows (v2 prompt x {flash, pro} x {5fps, 10fps}, response_schema
+    enforcement on every v2 call) found v2_flash_10fps clearly beats the old
+    v1/flash/5fps production baseline -- F1 (score>=4 vs verdict>=4) 0.364
+    -> 0.545, driven by recall tripling (0.25 -> 0.75) at some precision
+    cost (0.667 -> 0.429), a good trade given the actual usage pattern is
+    triage/sorting, not a hard cutoff (missing a real highlight is worse
+    than an extra clip to skim past). pro was a clear REGRESSION, not an
+    upgrade (F1 0.154 at 5fps, 0.000 at 10fps) -- it doesn't even set
+    goal_this_end=True on the same clearly-described, clearly-visible goals
+    flash catches, a perception difference, not just a wording-following
+    one. Do not switch to pro without new evidence. The goal_this_end
+    schema field (added in v2, see _DESCRIBE_RESPONSE_SCHEMA_V2) worked
+    exactly as intended for flash -- zero cases anywhere in the sweep of
+    goal_this_end=true with score<4. Two things this round did NOT fix,
+    still open: tier 5 was never awarded by any profile (0/66, including
+    the one real verdict-5 clip in the batch) -- fixing goal-recognition
+    was necessary but not sufficient, the skillful-vs-easy distinction for
+    goals still isn't landing; and the keeper-save tier-3 wording fix only
+    flipped 1 of 12 opportunities correctly -- revisit both with a future
+    game's data rather than guessing at another wording tweak now. See
+    Tests/pre_label/sweep_v2/sweep_comparison.csv on the Jul-26 game's
+    Drive folder for the full per-clip breakdown.
+
+    prompt_template/fps/response_schema default to the above (v2, 10fps,
+    schema-enforced) so every existing caller (pre-label, label-audit)
+    picks it up automatically; override to reproduce an older profile
+    (e.g. prompt_template=_DESCRIBE_PROMPT, fps=5, response_schema=None
+    for the original v1 production behavior). cfg.model selects flash vs
+    pro -- GeminiConfig's default (gemini-flash-latest) is correct, do not
+    change it to pro."""
     import os
 
     api_key = os.environ.get(cfg.api_key_env)
@@ -254,8 +346,13 @@ def generate_description(clip_path: Path, duration_seconds: float, cfg: GeminiCo
         raise RuntimeError(f"{cfg.api_key_env} is not set -- see README's Vision AI section for setup")
 
     try:
-        prompt = _DESCRIBE_PROMPT.format(duration=duration_seconds)
-        raw = _call_gemini(clip_path, prompt, cfg, api_key, video_metadata={"fps": 5})
+        prompt = (prompt_template or _DESCRIBE_PROMPT_V2).format(duration=duration_seconds)
+        generation_config = (
+            {"response_mime_type": "application/json", "response_schema": response_schema} if response_schema else None
+        )
+        raw = _call_gemini(
+            clip_path, prompt, cfg, api_key, video_metadata={"fps": fps}, generation_config=generation_config
+        )
         return _parse_describe_json(raw)
     except Exception as exc:
         print(f"WARNING: describe failed for {clip_path}: {exc}")
@@ -298,6 +395,7 @@ def _describe_to_dict(description: DescribeResult | None) -> dict | None:
         "caption": description.caption,
         "description": description.description,
         "rationale": description.rationale,
+        "goal_this_end": description.goal_this_end,
     }
 
 
@@ -305,7 +403,11 @@ def _describe_from_dict(data: dict | None) -> DescribeResult | None:
     if data is None:
         return None
     return DescribeResult(
-        score=data["score"], caption=data["caption"], description=data["description"], rationale=data.get("rationale", "")
+        score=data["score"],
+        caption=data["caption"],
+        description=data["description"],
+        rationale=data.get("rationale", ""),
+        goal_this_end=data.get("goal_this_end"),
     )
 
 

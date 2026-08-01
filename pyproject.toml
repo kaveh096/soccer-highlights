@@ -13,6 +13,7 @@ dependencies = [
     "pyyaml",
     "matplotlib",
     "anthropic",
+    "python-dotenv",
 ]
 
 [project.scripts]

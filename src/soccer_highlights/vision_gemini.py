@@ -99,17 +99,31 @@ def _extract_peak_clip(sample_window: Interval, chunks: list[Chunk], max_width: 
 
 
 def _call_gemini(
-    video_path: Path, prompt: str, cfg: GeminiConfig, api_key: str, video_metadata: dict | None = None
+    video_path: Path,
+    prompt: str,
+    cfg: GeminiConfig,
+    api_key: str,
+    video_metadata: dict | None = None,
+    generation_config: dict | None = None,
 ) -> str:
     """video_metadata (e.g. {"fps": 5}) overrides Gemini's default 1fps
     frame-sampling for this part -- optional and unused by classify_confirm
     (the concluded Rounds 1-4 vision-compare path stays exactly as it was);
-    label_audit.generate_description passes it, see that module for why."""
+    label_audit.generate_description passes it, see that module for why.
+
+    generation_config (e.g. {"response_mime_type": "application/json",
+    "response_schema": {...}}) turns on Gemini's structured-output mode,
+    which actually enforces field presence/order/type -- as opposed to just
+    asking for JSON in the prompt text and leniently parsing whatever comes
+    back (the original approach, still used by classify_confirm and the v1
+    describe prompt). Optional so existing callers are unaffected."""
     video_b64 = base64.standard_b64encode(video_path.read_bytes()).decode("utf-8")
     part: dict = {"inline_data": {"mime_type": "video/mp4", "data": video_b64}}
     if video_metadata:
         part["video_metadata"] = video_metadata
-    body = {"contents": [{"parts": [part, {"text": prompt}]}]}
+    body: dict = {"contents": [{"parts": [part, {"text": prompt}]}]}
+    if generation_config:
+        body["generation_config"] = generation_config
     url = _GENERATE_CONTENT_URL.format(model=cfg.model)
     request = urllib.request.Request(
         url,

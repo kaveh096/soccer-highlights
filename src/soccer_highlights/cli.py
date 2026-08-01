@@ -19,6 +19,18 @@ Subcommands:
                   from the full-res source at export.* settings -- a
                   compressed, widely-compatible copy for sharing (unlike
                   render's lossless-but-huge stream-copy clips).
+  export-picks  - re-encode a user-specified subset of an existing
+                  review_sheet.csv's rows (by clip_file) at export.*
+                  settings -- for exporting just the final hand-picked
+                  top clips, not every detected candidate (see export
+                  above for that). Reads start/end seconds straight from
+                  the sheet, no re-detection.
+  telegram-post - post a user-specified subset of already-exported clips
+                  (by clip_file) to a Telegram group via sendVideo, using
+                  the clip's Farsi gemini_caption from the review sheet
+                  as the post caption. --dry-run validates without
+                  posting. Tracks sent clips in a state file next to the
+                  clips so a rerun doesn't double-post.
   golden-score  - score the current strategy/config against a pre-built
                   golden event set (golden.py), audio-only, no rendering
                   or human review needed. For re-checking tuning changes
@@ -73,12 +85,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import shutil
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
-from soccer_highlights import clipping, label_audit, render, vision, vision_eval, vision_gemini
+from soccer_highlights import clipping, label_audit, render, telegram, vision, vision_eval, vision_gemini
 from soccer_highlights.audio import extract_audio_samples
 from soccer_highlights.config import Config, load_config, load_strategy_configs
 from soccer_highlights.detection import analyze
@@ -272,6 +286,102 @@ def cmd_export(cfg: Config, out_dir_override: str | None) -> None:
     if skipped:
         print(f"Skipped {skipped} already-exported clip(s) in {out_dir}")
     print(f"\nExported {len(merged)} clip(s) to {out_dir}")
+
+
+def cmd_export_picks(
+    cfg: Config, review_sheet_path: str, clip_files: list[str], out_dir_override: str | None, crf_override: int | None
+) -> None:
+    """Re-encode a user-specified subset of a review_sheet.csv's rows (by
+    clip_file) from the full-res source at export.* settings -- for
+    exporting just the final hand-picked top clips, not every detected
+    candidate (see cmd_export for that). Reads start/end seconds straight
+    from the sheet instead of re-running detection, so there's no risk of
+    interval-index drift if detection config has changed since the sheet
+    was generated."""
+    with open(review_sheet_path, encoding="utf-8-sig") as f:
+        rows = list(csv.DictReader(f))
+    by_clip_file = {row["clip_file"]: row for row in rows}
+    missing = [c for c in clip_files if c not in by_clip_file]
+    if missing:
+        raise SystemExit(f"clip_file(s) not found in {review_sheet_path}: {', '.join(missing)}")
+
+    chunks = discover_chunks(cfg.input.source_dir)
+    export_cfg = cfg.export
+    if crf_override is not None:
+        export_cfg.crf = crf_override
+    out_dir = Path(out_dir_override) if out_dir_override else Path(export_cfg.dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix="soccer_hl_export_picks_") as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        for i, clip_file in enumerate(clip_files):
+            row = by_clip_file[clip_file]
+            clip_path = out_dir / clip_file
+            if clip_path.exists() and clip_path.stat().st_size > 0:
+                print(f"Skipping {i + 1}/{len(clip_files)}: {clip_path.name} (already exported)")
+                continue
+            interval = Interval(start_seconds=float(row["start_seconds"]), end_seconds=float(row["end_seconds"]))
+            slices = map_interval_to_chunks(interval, chunks)
+            print(f"Exporting {i + 1}/{len(clip_files)}: {clip_path.name} ({interval.end_seconds - interval.start_seconds:.1f}s)")
+            render.render_export_clip(slices, clip_path, tmp_dir, export_cfg)
+
+    print(f"\nExported {len(clip_files)} clip(s) to {out_dir}")
+
+
+def cmd_telegram_post(
+    cfg: Config, review_sheet_path: str, clips_dir: str, clip_files: list[str], dry_run: bool
+) -> None:
+    """Post a user-specified subset of already-exported clips (by clip_file,
+    same identifiers export-picks uses) to a Telegram group via sendVideo.
+    Caption is the clip's Farsi gemini_caption from the review sheet, if
+    present, else just the clip_file name.
+
+    Tracks successfully-sent clips in <clips_dir>/.telegram_sent.json so a
+    rerun after a partial failure doesn't double-post to the group -- unlike
+    a redundant local render, a duplicate post is visible to everyone in the
+    group and can't be quietly cleaned up."""
+    with open(review_sheet_path, encoding="utf-8-sig") as f:
+        rows = list(csv.DictReader(f))
+    by_clip_file = {row["clip_file"]: row for row in rows}
+    missing = [c for c in clip_files if c not in by_clip_file]
+    if missing:
+        raise SystemExit(f"clip_file(s) not found in {review_sheet_path}: {', '.join(missing)}")
+
+    clips_dir_path = Path(clips_dir)
+    missing_files = [c for c in clip_files if not (clips_dir_path / c).exists()]
+    if missing_files:
+        raise SystemExit(f"clip_file(s) not found in {clips_dir}: {', '.join(missing_files)}")
+
+    sent_state_path = clips_dir_path / ".telegram_sent.json"
+    sent_state: dict = json.loads(sent_state_path.read_text(encoding="utf-8")) if sent_state_path.exists() else {}
+
+    if not dry_run:
+        bot_info = telegram.get_me(cfg.telegram)
+        print(f"Connected as @{bot_info.get('username', '?')}")
+
+    for i, clip_file in enumerate(clip_files):
+        video_path = clips_dir_path / clip_file
+        caption = by_clip_file[clip_file].get("gemini_caption", "").strip() or clip_file
+
+        if clip_file in sent_state:
+            print(f"Skipping {i + 1}/{len(clip_files)}: {clip_file} (already sent {sent_state[clip_file]['sent_at']})")
+            continue
+
+        size_mb = video_path.stat().st_size / (1024 * 1024)
+        if dry_run:
+            print(f"[DRY RUN] {i + 1}/{len(clip_files)}: {clip_file} ({size_mb:.1f}MB) -- caption: {caption}")
+            continue
+
+        print(f"Sending {i + 1}/{len(clip_files)}: {clip_file} ({size_mb:.1f}MB)...")
+        result = telegram.send_video(video_path, caption, cfg.telegram)
+        sent_state[clip_file] = {
+            "message_id": result["result"]["message_id"],
+            "sent_at": datetime.now(timezone.utc).isoformat(),
+        }
+        sent_state_path.write_text(json.dumps(sent_state, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    if not dry_run:
+        print(f"\nDone. {len(sent_state)} clip(s) recorded as sent in {sent_state_path}")
 
 
 def _print_golden_score(score: GoldenScore, game_duration: float) -> None:
@@ -603,6 +713,40 @@ def main() -> None:
     export_parser.add_argument(
         "--out-dir", type=str, default=None, help="Override export.dir (where the compressed highlight_NNN.mp4 files go)"
     )
+    export_picks_parser = subparsers.add_parser(
+        "export-picks",
+        help="Re-encode a user-specified subset of an existing review_sheet.csv's rows (by clip_file) "
+        "from the full-res source at export.* settings -- for exporting just the final hand-picked clips",
+    )
+    export_picks_parser.add_argument(
+        "--review-sheet", required=True, help="Path to the review_sheet.csv containing the picked rows"
+    )
+    export_picks_parser.add_argument(
+        "--clips", required=True, help="Comma-separated clip_file names to export, e.g. clip_055.mp4,clip_057.mp4"
+    )
+    export_picks_parser.add_argument(
+        "--out-dir", type=str, default=None, help="Override export.dir (where the compressed clips go)"
+    )
+    export_picks_parser.add_argument(
+        "--crf", type=int, default=None, help="Override export.crf (higher = smaller file/lower quality), e.g. for a Telegram-size-limited copy"
+    )
+    telegram_post_parser = subparsers.add_parser(
+        "telegram-post",
+        help="Post a user-specified subset of already-exported clips (by clip_file) to a Telegram group via sendVideo. "
+        "Caption is the clip's Farsi gemini_caption from the review sheet. Tracks sent clips to avoid double-posting.",
+    )
+    telegram_post_parser.add_argument(
+        "--review-sheet", required=True, help="Path to the review_sheet.csv containing the picked rows (for captions)"
+    )
+    telegram_post_parser.add_argument(
+        "--clips-dir", required=True, help="Directory containing the already-exported clip files (e.g. export-picks' --out-dir)"
+    )
+    telegram_post_parser.add_argument(
+        "--clips", required=True, help="Comma-separated clip_file names to post, e.g. clip_055.mp4,clip_057.mp4"
+    )
+    telegram_post_parser.add_argument(
+        "--dry-run", action="store_true", help="Validate files/captions/credentials and print what would be sent, without posting"
+    )
     golden_score_parser = subparsers.add_parser(
         "golden-score", help="Score the current --strategy/config against a pre-built golden event set (no rendering)"
     )
@@ -684,6 +828,12 @@ def main() -> None:
         cmd_score(cfg)
     elif args.command == "export":
         cmd_export(cfg, args.out_dir)
+    elif args.command == "export-picks":
+        cmd_export_picks(cfg, args.review_sheet, [c.strip() for c in args.clips.split(",")], args.out_dir, args.crf)
+    elif args.command == "telegram-post":
+        cmd_telegram_post(
+            cfg, args.review_sheet, args.clips_dir, [c.strip() for c in args.clips.split(",")], args.dry_run
+        )
     elif args.command == "golden-score":
         cmd_golden_score(cfg, args.golden_events, args.vision)
     elif args.command == "vision-highlights":
