@@ -220,6 +220,9 @@ __marimo__/
 # Generated pipeline output (clips, event logs, debug plots)
 /output/
 
-# Local Claude Code tool state (machine-specific, not project source)
-/.claude/
+# Local Claude Code tool state (machine-specific, not project source) --
+# except skills/, which is versioned project documentation/tooling, not
+# machine-local state.
+/.claude/*
+!/.claude/skills/
 
