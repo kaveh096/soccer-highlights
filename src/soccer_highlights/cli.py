@@ -85,11 +85,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import functools
 import json
 import os
+import re
 import shutil
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from soccer_highlights import clipping, label_audit, render, telegram, vision, vision_eval, vision_gemini
@@ -597,7 +599,7 @@ def cmd_label_audit(cfg: Config, limit: int | None) -> None:
     print(f"Wrote {len(flagged)} flagged clip(s) to {clips_dir}")
 
 
-def cmd_pre_label(cfg: Config, out_dir: str, lrf_cache_dir: str | None = None) -> None:
+def cmd_pre_label(cfg: Config, out_dir: str, lrf_cache_dir: str | None = None, fps: int | None = None) -> None:
     """Detect candidates in a brand-new (not-yet-labeled) recording,
     render small/fast clips, generate a Gemini description for each (no
     judge step -- there's no prior human label yet to compare against),
@@ -665,8 +667,10 @@ def cmd_pre_label(cfg: Config, out_dir: str, lrf_cache_dir: str | None = None) -
         for i, interval in enumerate(merged, start=1)
     ]
     cache_path = strategy_dir / "descriptions_cache.json"
-    print(f"\nGenerating {len(rows)} Gemini description(s) (cache: {cache_path})...")
-    descriptions = label_audit.run_describe_only(rows, cfg.gemini, cache_path)
+    describe_fn = functools.partial(label_audit.generate_description, fps=fps) if fps is not None else None
+    fps_note = f" at fps={fps} (override)" if fps is not None else ""
+    print(f"\nGenerating {len(rows)} Gemini description(s){fps_note} (cache: {cache_path})...")
+    descriptions = label_audit.run_describe_only(rows, cfg.gemini, cache_path, describe_fn=describe_fn)
 
     sheet_path = generate_review_sheet(strategy_dir)
     with open(sheet_path, encoding="utf-8") as f:
@@ -682,6 +686,132 @@ def cmd_pre_label(cfg: Config, out_dir: str, lrf_cache_dir: str | None = None) -
         writer.writerows(sheet_rows)
 
     print(f"\nWrote {len(merged)} candidate clip(s) + {sheet_path} to {strategy_dir}")
+
+
+_CANONICAL_CLIP_RE = re.compile(r"c(?:lip_)?(\d{3})")
+
+
+def _canonical_clip_file(name: str) -> str:
+    """Recover the canonical ``clip_NNN.mp4`` id from either a canonical name
+    or a decorated one (``r01_s4_746a_c002.mp4``). Every decorated name keeps
+    a ``c0NN`` token precisely so this is always possible -- that token is
+    what makes the rename reversible and keeps the position-keyed describe
+    cache, the review sheet, export-picks and telegram-post all resolving to
+    one stable identity no matter which naming a given folder is currently in."""
+    match = _CANONICAL_CLIP_RE.search(Path(name).stem)
+    if match is None:
+        raise ValueError(f"Cannot recover a canonical clip id from {name!r}")
+    return f"clip_{match.group(1)}.mp4"
+
+
+def _wall_clock_tag(global_seconds: float, chunks: list[Chunk]) -> str:
+    """Time-of-day label (e.g. ``746a``) for a global-timeline offset.
+
+    discover_chunks builds global_start_seconds by accumulating durations
+    alone -- an explicit continuous-recording assumption -- so elapsed media
+    time drifts from real time by however long the camera was stopped between
+    chunks. On the 2026-08-23 game that was 41.5 min of unrecorded time across
+    a 110.3 min window (68.8 min of footage), making late clips read ~4.5 min
+    early. Re-anchoring through the owning chunk's own filename timestamp
+    removes that drift entirely, so the label always matches what a human
+    remembers about when something happened."""
+    for chunk in chunks:
+        if chunk.global_start_seconds <= global_seconds < chunk.global_start_seconds + chunk.duration_seconds:
+            stamp = chunk.start_time + timedelta(seconds=global_seconds - chunk.global_start_seconds)
+            break
+    else:
+        last = chunks[-1]
+        stamp = last.start_time + timedelta(seconds=last.duration_seconds)
+    return stamp.strftime("%I%M%p").lower().replace("am", "a").replace("pm", "p").lstrip("0")
+
+
+def cmd_name_candidates(cfg: Config, candidates_dir: str, revert: bool = False) -> None:
+    """Rename pre-label candidate clips to ``r01_s4_746a_c002.mp4`` -- review
+    rank, Gemini score, wall-clock time, canonical id -- so the folder's
+    default A-Z sort *is* the review order (best first, chronological within a
+    score band) instead of burying the interesting clips among the 2s.
+
+    Renames in place and rewrites ``clip_file`` in both review_sheet.csv and
+    descriptions_cache.json in the same pass, so the cache's position-keyed
+    consistency check still passes and no Gemini call gets re-paid for. Run
+    this only once pre-label has fully finished: rank depends on the score, so
+    renaming while describe retries are still filling in nulls would produce a
+    ranking that's wrong the moment the next retry lands (hence the
+    all-rows-scored guard below).
+
+    ``--revert`` restores canonical ``clip_NNN.mp4`` names, which is what to
+    run before re-running pre-label over an already-renamed folder -- pre-label
+    re-renders to canonical names and would otherwise leave both namings side
+    by side and trip the cache mismatch check."""
+    candidates_path = Path(candidates_dir)
+    sheet_path = candidates_path / "review_sheet.csv"
+    cache_path = candidates_path / "descriptions_cache.json"
+    if not sheet_path.exists():
+        raise SystemExit(f"No review_sheet.csv in {candidates_path}")
+
+    with open(sheet_path, encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+        fieldnames = list(rows[0].keys()) if rows else []
+
+    if revert:
+        new_names = {row["clip_file"]: _canonical_clip_file(row["clip_file"]) for row in rows}
+    else:
+        unscored = [row["clip_file"] for row in rows if not row.get("gemini_score")]
+        if unscored:
+            raise SystemExit(
+                f"{len(unscored)} row(s) still have no gemini_score ({', '.join(unscored[:5])}"
+                f"{'...' if len(unscored) > 5 else ''}). Rank is derived from the score, so finish "
+                "the pre-label describe pass first (re-run it -- the cache only retries failures)."
+            )
+        chunks = discover_chunks(cfg.input.source_dir)
+        ranked = sorted(rows, key=lambda r: (-int(r["gemini_score"]), float(r["start_seconds"])))
+        new_names = {}
+        for rank, row in enumerate(ranked, start=1):
+            clock = _wall_clock_tag(float(row["start_seconds"]), chunks)
+            canonical = _canonical_clip_file(row["clip_file"])
+            new_names[row["clip_file"]] = (
+                f"r{rank:02d}_s{int(row['gemini_score'])}_{clock}_c{canonical[5:8]}.mp4"
+            )
+
+    # Two-phase rename: a new name can collide with some *other* clip's current
+    # name (re-running after scores changed reshuffles ranks), so park
+    # everything under a temp name first rather than clobbering mid-pass.
+    staged: list[tuple[Path, Path]] = []
+    for old_name, new_name in new_names.items():
+        if old_name == new_name:
+            continue
+        old_path = candidates_path / old_name
+        if not old_path.exists():
+            print(f"WARNING: {old_name} not found on disk, skipping rename")
+            continue
+        tmp_path = candidates_path / f".renaming_{new_name}"
+        old_path.rename(tmp_path)
+        staged.append((tmp_path, candidates_path / new_name))
+    for tmp_path, final_path in staged:
+        tmp_path.rename(final_path)
+
+    for row in rows:
+        row["clip_file"] = new_names.get(row["clip_file"], row["clip_file"])
+    with open(sheet_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    if cache_path.exists():
+        with open(cache_path, encoding="utf-8") as f:
+            entries = json.load(f)
+        for entry in entries:
+            entry["clip_file"] = new_names.get(entry["clip_file"], entry["clip_file"])
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(entries, f, indent=2)
+
+    action = "Reverted" if revert else "Renamed"
+    print(f"{action} {len(staged)} clip(s); updated {sheet_path.name}" + (" + descriptions_cache.json" if cache_path.exists() else ""))
+    if not revert:
+        for row in sorted(rows, key=lambda r: r["clip_file"])[:10]:
+            print(f"  {row['clip_file']}")
+        if len(rows) > 10:
+            print(f"  ... {len(rows) - 10} more")
 
 
 def main() -> None:
@@ -803,10 +933,31 @@ def main() -> None:
         "--out-dir", required=True, help="Where to write events.json/clips/review_sheet.csv, e.g. a game's Tests folder"
     )
     pre_label_parser.add_argument(
+        "--fps",
+        type=int,
+        default=None,
+        help="Override Gemini describe-call fps sampling (default: generate_description's own default, currently 10, "
+        "the validated production value -- pass this only for a deliberate one-off experiment)",
+    )
+    pre_label_parser.add_argument(
         "--lrf-cache-dir",
         default=None,
         help="Redirect heavy .LRF reads to a local copy in this directory (source_dir's .MP4 files are still "
         "used for chunk discovery/duration, a small fast read) -- for an unreliable network/cloud source_dir",
+    )
+
+    name_candidates_parser = subparsers.add_parser(
+        "name-candidates",
+        help="Rename pre-label candidates to r<rank>_s<score>_<wallclock>_c<id>.mp4 so the folder's "
+        "default sort is the review order; updates review_sheet.csv + descriptions_cache.json to match",
+    )
+    name_candidates_parser.add_argument(
+        "--candidates-dir", required=True, help="The pre_label candidates/ folder to rename in place"
+    )
+    name_candidates_parser.add_argument(
+        "--revert",
+        action="store_true",
+        help="Restore canonical clip_NNN.mp4 names (run this before re-running pre-label on a renamed folder)",
     )
 
     args = parser.parse_args()
@@ -843,7 +994,9 @@ def main() -> None:
     elif args.command == "label-audit":
         cmd_label_audit(cfg, args.limit)
     elif args.command == "pre-label":
-        cmd_pre_label(cfg, args.out_dir, args.lrf_cache_dir)
+        cmd_pre_label(cfg, args.out_dir, args.lrf_cache_dir, args.fps)
+    elif args.command == "name-candidates":
+        cmd_name_candidates(cfg, args.candidates_dir, args.revert)
 
 
 if __name__ == "__main__":

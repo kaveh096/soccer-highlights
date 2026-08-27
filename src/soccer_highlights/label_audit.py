@@ -471,8 +471,12 @@ def run_audit(
         results.append(AuditRow(row=row, description=description, judge=judge))
         entries[i] = _entry_from_result(row, description, judge)
         cache_path.parent.mkdir(parents=True, exist_ok=True)
+        # Write the full entries list, not entries[:i+1] -- a prefix write means a
+        # process killed mid-loop truncates away every already-cached row past i,
+        # not just the one in flight (found 2026-08-23: a killed retry dropped 30
+        # already-described clips from the cache).
         with open(cache_path, "w", encoding="utf-8") as f:
-            json.dump(entries[: i + 1], f, indent=2)
+            json.dump(entries, f, indent=2)
 
     return results
 
@@ -519,7 +523,7 @@ def run_describe_only(
         }
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         with open(cache_path, "w", encoding="utf-8") as f:
-            json.dump(entries[: i + 1], f, indent=2)
+            json.dump(entries, f, indent=2)
 
     return results
 
