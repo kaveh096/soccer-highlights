@@ -284,7 +284,7 @@ def generate_description(
     duration_seconds: float,
     cfg: GeminiConfig,
     prompt_template: str | None = None,
-    fps: int = 10,
+    fps: int = 15,
     response_schema: dict | None = _DESCRIBE_RESPONSE_SCHEMA_V2,
 ) -> DescribeResult | None:
     """Score an already-rendered clip (the same file a human labels/labeled)
@@ -332,13 +332,22 @@ def generate_description(
     Tests/pre_label/sweep_v2/sweep_comparison.csv on the Jul-26 game's
     Drive folder for the full per-clip breakdown.
 
-    prompt_template/fps/response_schema default to the above (v2, 10fps,
+    fps=15 (2026-08-30): raised from the sweep-validated 10fps default at
+    Kaveh's explicit request for the Aug-30 game, NOT because of new sweep
+    evidence -- 15fps has never been run through the sweep_prompt.py /
+    analyze_sweep.py methodology (evals.md Part B). The 2026-07-31 sweep
+    only tested 5fps vs 10fps and 10fps won; whether 15fps helps, hurts, or
+    is a wash (e.g. on the still-open tier-5/keeper-save gaps) is unknown.
+    Revisit with a real sweep against Aug-30's labeled data before treating
+    15fps as settled the way 10fps was.
+
+    prompt_template/fps/response_schema default to the above (v2, 15fps,
     schema-enforced) so every existing caller (pre-label, label-audit)
     picks it up automatically; override to reproduce an older profile
     (e.g. prompt_template=_DESCRIBE_PROMPT, fps=5, response_schema=None
-    for the original v1 production behavior). cfg.model selects flash vs
-    pro -- GeminiConfig's default (gemini-flash-latest) is correct, do not
-    change it to pro."""
+    for the original v1 production behavior, or fps=10 for the last
+    sweep-validated value). cfg.model selects flash vs pro -- GeminiConfig's
+    default (gemini-flash-latest) is correct, do not change it to pro."""
     import os
 
     api_key = os.environ.get(cfg.api_key_env)

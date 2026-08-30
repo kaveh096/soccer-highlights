@@ -941,8 +941,8 @@ def main() -> None:
         "--fps",
         type=int,
         default=None,
-        help="Override Gemini describe-call fps sampling (default: generate_description's own default, currently 10, "
-        "the validated production value -- pass this only for a deliberate one-off experiment)",
+        help="Override Gemini describe-call fps sampling (default: generate_description's own default, currently 15 "
+        "-- set 2026-08-30 by explicit request, not a re-swept value; 10 was the last sweep-validated default)",
     )
     pre_label_parser.add_argument(
         "--lrf-cache-dir",
