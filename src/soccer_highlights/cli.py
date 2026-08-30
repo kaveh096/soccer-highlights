@@ -319,9 +319,14 @@ def cmd_export_picks(
         for i, clip_file in enumerate(clip_files):
             row = by_clip_file[clip_file]
             clip_path = out_dir / clip_file
-            if clip_path.exists() and clip_path.stat().st_size > 0:
+            if render.is_playable(clip_path):
                 print(f"Skipping {i + 1}/{len(clip_files)}: {clip_path.name} (already exported)")
                 continue
+            if clip_path.exists():
+                # Present but unplayable == a killed render's truncated leftover.
+                # Drop it rather than skipping it (see render.is_playable).
+                print(f"Re-exporting {clip_path.name}: existing file is truncated/unplayable")
+                clip_path.unlink()
             interval = Interval(start_seconds=float(row["start_seconds"]), end_seconds=float(row["end_seconds"]))
             slices = map_interval_to_chunks(interval, chunks)
             print(f"Exporting {i + 1}/{len(clip_files)}: {clip_path.name} ({interval.end_seconds - interval.start_seconds:.1f}s)")

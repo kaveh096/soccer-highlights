@@ -25,6 +25,27 @@ def _run_ffmpeg(args: list[str]) -> None:
     subprocess.run(["ffmpeg", "-v", "error", "-y", *args], check=True)
 
 
+def is_playable(path: Path) -> bool:
+    """True only if ffprobe can read a duration out of `path`.
+
+    Existence plus a non-zero size is NOT enough to call a render finished: a
+    process killed mid-encode leaves a large file with no `moov` atom, which
+    ffprobe rejects as "moov atom not found" and no player will open. This bit
+    hard on 2026-08-23 -- an export killed partway left a 9.5MB corpse that
+    cmd_export_picks' resume check happily treated as done, and it would have
+    been posted to Telegram if it hadn't been spot-checked. Any resume/skip
+    decision about an existing media file should go through this, not through
+    `stat().st_size > 0`."""
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0 and result.stdout.strip() not in ("", "N/A")
+
+
 def _encode_piece(source_path: Path, start: float, duration: float, out_path: Path, cfg: ReviewConfig | ExportConfig) -> None:
     audio_args = ["-ac", "1"] if cfg.mono_audio else []
     _run_ffmpeg(

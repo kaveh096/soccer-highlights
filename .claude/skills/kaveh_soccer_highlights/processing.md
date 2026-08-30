@@ -178,6 +178,41 @@ Expect needing 2-3 retry rounds during a sustained congestion window (seen
 mid-write looks truncated (fewer entries than expected), that's a transient race
 with the writer, not real data loss -- re-check a moment later.
 
+### Step 1b -- rename candidates into review order (`name-candidates`)
+
+Run this **only once `pre-label` has fully finished** (every row scored -- the
+command refuses otherwise, since rank is derived from the score and would go
+stale the moment another describe retry lands).
+
+```bash
+./.venv/Scripts/python.exe -m soccer_highlights.cli \
+  --source-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Raw" \
+  name-candidates \
+  --candidates-dir "G:/.../Tests/pre_label/candidates"
+```
+
+Renames `clip_002.mp4` -> `r01_s4_746a_c002.mp4`: **r**eview rank, gemini
+**s**core, wall-clock time, and the canonical **c**lip id. The point is that the
+folder's default A-Z sort becomes the review order (best first, chronological
+within a score band) instead of burying the good clips among the 2s.
+
+- The `c0NN` token is what keeps every rename reversible and keeps the review
+  sheet, the describe cache, `export-picks` and `telegram-post` all resolving to
+  one identity. Don't strip it.
+- It rewrites `clip_file` in `review_sheet.csv` **and** `descriptions_cache.json`
+  in the same pass, so the cache's position-keyed check still passes and no
+  Gemini call gets re-paid for.
+- The time is **wall-clock, not elapsed footage time** -- `discover_chunks` sums
+  durations only, so media time drifts from real time by however long the camera
+  was stopped (41.5 min across a 110.3 min window on Aug-23). The tag re-anchors
+  through each chunk's own filename timestamp so it matches what you remember.
+- `--revert` restores canonical names and round-trips byte-identically. **Run it
+  before re-running `pre-label` on an already-renamed folder** -- `pre-label`
+  re-renders to canonical names and would otherwise leave both namings side by
+  side and trip the cache mismatch check.
+- Renaming after posting would break `.telegram_sent.json`'s double-post
+  protection (it keys on `clip_file`). Order is always rename -> export -> post.
+
 ### Step 2 -- fill in verdict/notes, but DO NOT edit `review_sheet.csv` in Excel
 
 Watch the clips in `Tests\pre_label\candidates\`, fill in each row's `verdict`
@@ -223,22 +258,76 @@ cd C:/dev/soccer-highlights
 ```
 Re-encodes just the picked clips (by `clip_file`, reading start/end straight from
 the sheet -- no re-detection, no index-drift risk) from the **full-res 4K `.MP4`**
-(never the `.LRF`) at `export.*` settings, with `--crf 30` overriding the archival
+(never the `.LRF`) at `export.*` settings, with `--crf` overriding the archival
 default (18) **for this invocation only** -- it doesn't touch `config/default.yaml`
 or persist anywhere; the plain `export` command (every detected candidate, not just
-picks) still uses CRF 18 unless you pass the flag there too. Why 30 here: Telegram's Bot API `sendVideo` has a hard **50MB**
-per-file limit, and CRF 18/2560px clips ran 65MB+ even for a 17s clip -- CRF 30
-was validated (2026-07-31, Jul-26 game) to bring even a 49.5s clip down to ~19MB,
-comfortable margin. **This ratio is specific to that game's clip-length
-distribution and this laptop's ffmpeg build** -- for a new game, it's worth
-spot-checking the single longest picked clip's output size before trusting CRF 30
-blindly on the full batch (export the worst case first, in the background, check
-`ls -la`, then batch the rest).
+picks) still uses CRF 18 unless you pass the flag there too.
 
-This is **decode-bound and slow** (full 4K/10-bit HEVC source) -- budget several
-minutes per clip (a 49.5s clip took ~7 minutes on this laptop), run in the
-background (`run_in_background: true`), don't run alongside another heavy
-render/encode job.
+**Pick CRF per clip, not once for the batch.** Telegram's Bot API `sendVideo` has
+a hard **50MB** per-file limit, and that limit is *per file* -- so a single global
+CRF either busts the cap on the longest clip or throws away quality on all the
+short ones. Measured on the Aug-23 game: output size varies **~5x with scene
+motion at a fixed CRF** (1.6-3.5 MB/s at CRF 18 across that game's clips). What
+that worked out to in practice, and a reasonable starting point for a new game:
+
+| clip duration | CRF | resulting size |
+|---|---|---|
+| <= 14s | 18 | 23-47MB |
+| ~18s | 22 | 23-26MB |
+| 40-45s | 24-30 | 25-35MB |
+
+**Re-measure instead of extrapolating.** The usual "+6 CRF halves the bitrate"
+rule of thumb was badly wrong on this footage: on a static wide-shot clip the
+real factor was ~1.25x per *single* CRF step (9.8MB at CRF 30 -> 88.7MB at CRF 20
+on the same clip -- a 9x swing over 10 steps). Render one clip, read the actual
+size, then solve for the CRF the rest need.
+
+**Speed: budget ~37x realtime**, not the ~10x figure in `ExportConfig`'s older
+comment (that benchmark was not run against sources on the Drive path).
+Re-measured 2026-08-23: 5s of footage took 188s end to end. Decode alone is a
+~20x realtime floor; `preset medium` adds ~88s per 5s, `preset veryfast` only
+~36s. A 10-clip / ~208s batch is therefore **~2.2 hours**. Don't run it alongside
+another heavy render/encode job.
+
+**Render to a LOCAL out-dir, then copy to `Sharable\`.** Writing a large file
+straight to the Google Drive path is what stalled and killed the first Aug-23
+attempts -- Drive FS warnings in the Windows event log lined up exactly with the
+deaths (`Get-WinEvent -FilterHashtable @{LogName='System'; ID=42,107,1}`).
+
+**For any clip over ~15s of footage, use `scripts/seg_render.py` instead.** At
+37x realtime, ~15s is all that fits in a 10-minute command timeout, and long
+unattended runs on this laptop get killed often enough that a 25-minute
+single-shot render is a coin flip. `seg_render.py` splits one clip into
+segments, renders only the missing ones (one per invocation by default), and
+stream-copy concats when they're all present -- rerun the identical command
+until it prints `DONE`:
+
+```bash
+./.venv/Scripts/python.exe .claude/skills/kaveh_soccer_highlights/scripts/seg_render.py \
+  --source-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Raw" \
+  --review-sheet "G:/.../post_sheet.csv" \
+  --clip "r30_31_s2_821a_c025_c026.mp4" --crf 24 \
+  --out-dir "C:/local/scratch/export" [--seg-seconds 11.0] [--max-segments 1]
+```
+
+**Always verify an export before trusting it.** A killed render leaves a large
+file with no `moov` atom that no player will open. `export-picks` and
+`seg_render.py` both now check with `render.is_playable()` (an `ffprobe`
+duration read) rather than `size > 0`, and delete-and-re-render anything
+truncated -- but if you produce clips any other way, check them yourself:
+`ffprobe -v error -show_entries format=duration -of csv=p=0 clip.mp4`.
+
+### Step 4b -- merging two adjacent candidates into one clip
+
+When two candidates are really one moment split in half, don't hand-edit
+`review_sheet.csv` (it's the ground truth for F1 work). Build a small derived
+**`post_sheet.csv`** next to it with the same `clip_file`/`start_seconds`/
+`end_seconds`/`gemini_caption` columns, one row per final pick, and give the
+merged row the earlier clip's start and the later clip's end -- the gap between
+them gets filled in automatically since the export just cuts one interval. Join
+the two Farsi captions for the merged row. Then point **both** `export-picks`
+and `telegram-post` at `post_sheet.csv`; both only need those columns, and the
+real `review_sheet.csv` stays pristine.
 
 ### Step 5 -- post to Telegram (`telegram-post`)
 
@@ -264,6 +353,14 @@ recorded in `<clips-dir>/.telegram_sent.json`; **a rerun skips anything already
 in that file**, so it's always safe to re-run after a partial failure without
 double-posting to the group.
 
+**Upload timeouts**: `request_timeout_seconds` covers the whole upload, not just
+the connect, so it has to fit the largest file the 50MB cap allows on a home
+upstream link. The old 120s default died mid-upload on a 45MB clip (2026-08-23)
+right after succeeding on a 24MB one; the default is now 900s. If a future
+connection is slower still, raise it for one run without editing config:
+`SOCCER_HL__TELEGRAM__REQUEST_TIMEOUT_SECONDS=1800`. Posting in batches of ~3
+clips also keeps any single failure cheap, and the sent-file makes resuming free.
+
 `--review-sheet` here only needs `clip_file`/`gemini_caption` -- point it at the
 **original** `review_sheet.csv`, not an Excel-edited copy (Step 2's warning).
 
@@ -280,3 +377,8 @@ double-posting to the group.
 | `telegram-post` "chat not found" | Bot never actually received a group message (privacy mode) | Send a `/command` or `@mention` in the group, then re-check `getUpdates` |
 | Background job silently dies, no error | Laptop sleep, or the terminal app closing overnight | Check `Get-CimInstance Win32_OperatingSystem \| select LastBootUpTime`; design for resumability, not a one-shot fix |
 | Two heavy jobs compete for CPU | Another render/API job still running | `Get-CimInstance Win32_Process \| Where-Object Name -match 'ffmpeg\|python'` before starting a heavy step |
+| Render dies partway, leaves a big file | Killed mid-encode -- no `moov` atom written | Never trust `size > 0`; `render.is_playable()` / `ffprobe` it. `export-picks` + `seg_render.py` now auto-delete and re-render these |
+| Long render killed repeatedly, no progress | Writing straight to the Google Drive path stalls (Drive FS events in the Windows event log) | Render to a local dir, copy to `Sharable\` after |
+| Clip too long to render in one run | ~37x realtime means >15s of footage blows a 10-min timeout | `scripts/seg_render.py`, rerun until `DONE` |
+| Exported clip over 50MB | One global CRF can't fit both long and short clips; size varies ~5x with motion | Per-clip CRF (Step 4 table); re-measure, don't extrapolate the +6-CRF rule |
+| `telegram-post` times out mid-upload | `request_timeout_seconds` covers the whole upload | Default is now 900s; raise via `SOCCER_HL__TELEGRAM__REQUEST_TIMEOUT_SECONDS`, post in small batches |

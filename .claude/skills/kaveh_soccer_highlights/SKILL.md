@@ -19,7 +19,15 @@ prior sessions.
 - **[evals.md](evals.md)** -- how to tune this system when something needs
   improving: audio-detection parameters (rarely needed, mostly settled) and the
   Gemini scoring prompt (more likely to need revisiting as new games surface new
-  edge cases). Includes two promoted, reusable scripts in `scripts/`.
+  edge cases).
+
+**`scripts/`** holds three promoted, reusable helpers. Know which is which:
+- `sweep_prompt.py` / `analyze_sweep.py` -- **eval only** (evals.md Part B). Run
+  one Gemini describe profile over a labeled sheet, then compare profiles by
+  P/R/F1. Not part of a normal weekly run.
+- `seg_render.py` -- **weekly workflow** (processing.md Step 4). Exports one
+  share-quality clip in resumable segments, for clips too long to finish in a
+  single run on this laptop. Reach for it whenever a pick is longer than ~15s.
 
 ## The one-sentence pipeline
 
@@ -87,12 +95,26 @@ with the Farsi caption.
   Software H.265/HEVC decode of the full 4K source runs ~16-18x slower than
   realtime. This is why the pipeline prefers the `.LRF` proxy (720p H.264,
   ~1/16th the size) for everything except the final share-quality export.
+  **Measured end-to-end export cost is worse than that: ~37x realtime**
+  (2026-08-23, sources on the Drive path) -- ~20x is decode floor, the rest is
+  `preset medium` encode. Budget ~2.2 hours for a 10-clip batch, and see
+  processing.md Step 4 before planning any export work.
 - **This laptop has been interrupted by sleep and by the terminal app closing
   overnight**, more than once, during long unattended jobs -- not just a one-off.
   Every long-running step in this pipeline is designed to be resumable
   (incremental, position-keyed caching that only retries what actually failed).
   Trust that design; don't add fresh incremental-save logic from scratch if an
   existing resumable command already covers the case.
+- **A killed job can leave a plausible-looking but broken artifact.** Two
+  instances found 2026-08-23, both now fixed but worth recognizing the pattern:
+  a truncated video with no `moov` atom that a `size > 0` check called "done"
+  (use `render.is_playable()`), and a JSON cache written as a growing prefix
+  (`entries[:i+1]`) that discarded 30 already-cached rows when killed mid-loop.
+  **When adding any resume/skip check, validate the artifact, don't just stat
+  it** -- and write whole files, not prefixes.
+- **Anything over ~15s of footage cannot be exported in one command run** at 37x
+  realtime. Use `scripts/seg_render.py`, and render to a local dir rather than
+  straight to the Google Drive path (large writes there stall and get killed).
 - **Check for other running render/API jobs before starting a heavy one** --
   `Get-CimInstance Win32_Process | Where-Object Name -match 'ffmpeg|python'` (this
   has bitten a prior session: two heavy jobs competing for this weak CPU at once).

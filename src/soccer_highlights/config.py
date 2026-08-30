@@ -143,6 +143,24 @@ class ExportConfig:
     # 35MB/12s; 1920px: ~10.4x, near-identical since decode-bound; 3840px:
     # ~21x realtime, 96MB/12s). 2K gives the same crf-18 quality target
     # for social media at roughly half the time and disk of full 4K.
+    #
+    # Re-benchmarked 2026-08-23 with source .MP4s on the Google Drive path
+    # (not a local copy) and the numbers are much worse than the 2026-07-28
+    # figures above: 5s of footage at 2560px/crf18/preset medium took 188s
+    # end to end == ~37.6x realtime. Isolating the stages: decode alone is
+    # ~20x realtime (100s) and is an irreducible floor; preset medium adds
+    # ~88s of encode, preset veryfast only ~36s. Budget ~37x realtime, i.e.
+    # roughly 2.2 hours for a 10-clip / ~208s batch, and note that any clip
+    # over ~15s of footage cannot finish inside a 10-minute command timeout
+    # -- see scripts/seg_render.py for the segmented, resumable workaround.
+    #
+    # Output size varies ~5x with scene motion at a fixed CRF (measured
+    # 1.6-3.5 MB/s at crf18 across one game's clips), so a single global CRF
+    # either busts Telegram's 50MB cap on the longest clip or wastes quality
+    # on the rest. Pick CRF per clip from its duration, and re-measure rather
+    # than extrapolating: the usual "+6 CRF halves the bitrate" rule was badly
+    # wrong on static wide-shot footage, where the real factor was ~1.25x per
+    # single CRF step (9.8MB at crf30 -> 88.7MB at crf20 on the same clip).
     dir: str = "output/export"
     max_width: int = 2560
     fps: float = 30.0
@@ -260,7 +278,14 @@ class TelegramConfig:
     # too-large file fails fast with a clear message instead of a confusing
     # HTTP error partway through a slow upload.
     max_file_size_mb: float = 50.0
-    request_timeout_seconds: float = 120.0
+    # Covers the whole upload, not just connect -- so it has to be sized for
+    # the largest file the 50MB cap allows on a home upstream link, not for a
+    # quick API round-trip. 120s was too low and failed mid-upload on a 45MB
+    # clip (2026-08-23) after successfully sending a 24MB one, leaving a
+    # partial batch. 900s is deliberately generous: a stalled upload costs
+    # only wall-clock time, whereas a timeout costs a re-upload of everything
+    # already pushed for that clip.
+    request_timeout_seconds: float = 900.0
     max_retries: int = 2
 
 
