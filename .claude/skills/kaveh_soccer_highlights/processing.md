@@ -134,6 +134,28 @@ defaults still point at old repo-relative paths that no longer exist.
 
 ## Part 3: The recurring weekly workflow
 
+**Two modes -- most weeks are "quick share," not "full eval."** Steps 0/1/1b
+(detect + render + Gemini describe/score, rename) are always run the same
+way. Steps 2/3 (deciding the final picks) branch:
+
+- **Quick share (the common case)**: Kaveh watches clips soon after the game
+  to post highlights fast. He picks `clip_file`s to export/post directly off
+  the ranked sheet -- `gemini_score` plus a quick skim of `gemini_description`
+  is enough to decide. **`verdict`/`notes` are left blank**, deliberately --
+  filling them out is the time-consuming part and isn't needed just to post
+  clips. Skip straight to Step 3/4/5 below.
+- **Full eval (occasional, later)**: only when actually tuning the Gemini
+  prompt or re-checking detection recall (evals.md Part B) does the
+  `verdict`/`notes` column need to be filled in for every row -- that's what
+  turns a game's sheet into labeled ground truth for a P/R/F1 sweep. This can
+  happen well after the game, on the same `review_sheet.csv`, as a separate
+  pass -- it doesn't have to happen before clips get posted, and most weeks
+  it doesn't happen at all.
+
+Don't assume a given week's `review_sheet.csv` has verdicts filled in just
+because clips already got posted -- check before treating a sheet as eval-
+ready ground truth for evals.md Part B.
+
 ### Step 0 -- get footage onto Drive
 
 Copy the DJI card's `DJI_*_D.MP4` + `.LRF` files into a new
@@ -174,9 +196,67 @@ describe step IS resumable (`descriptions_cache.json`, only retries `null`
 entries). If a run finishes with failures, just re-run the exact same command --
 it'll skip everything already rendered/described and only retry what failed.
 Expect needing 2-3 retry rounds during a sustained congestion window (seen
-37->23->6->1->0 failures across rounds in practice). If a JSON cache read
-mid-write looks truncated (fewer entries than expected), that's a transient race
-with the writer, not real data loss -- re-check a moment later.
+37->23->6->1->0 failures across rounds in practice, and separately 27->9->3->0
+on Aug-30). If a JSON cache read mid-write looks truncated (fewer entries than
+expected), that's a transient race with the writer, not real data loss --
+re-check a moment later.
+
+**Checking `descriptions_cache.json` success count: use the nested `describe`
+field, not list-entry truthiness.** Each entry is always a dict (`{strategy,
+clip_file, start_seconds, end_seconds, describe}`), so `v is not None` over the
+list is always true and silently overcounts successes -- this cost a whole
+monitoring cycle of wrong progress reports on Aug-30 before being caught. Count
+real successes with:
+```bash
+python -c "import json; d=json.load(open(r'<out_dir>/candidates/descriptions_cache.json', encoding='utf-8')); missing=[v['clip_file'] for v in d if v.get('describe') is None]; print(len(d)-len(missing), '/', len(d), 'missing:', missing)"
+```
+
+**If a `pre-label` run launched via the Bash tool's `run_in_background` gets
+killed with empty output before finishing (seen repeatedly on Aug-30, killed
+within seconds to a few minutes, with zero stdout captured even right before
+the kill) -- this is the tool's own background-task tracking, not the OS, not
+Drive I/O, and not the laptop sleeping.** Confirmed by: no reboot
+(`Get-CimInstance Win32_OperatingSystem | select LastBootUpTime`), no orphaned
+process left behind, and it recurred even with `PYTHONUNBUFFERED=1` and zero
+other Bash/PowerShell calls interleaved. Workaround: launch fully detached from
+PowerShell instead, which escapes the tool's tracking entirely --
+```powershell
+$env:PATH = "C:\Users\Kaveh\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.2-full_build\bin;" + $env:PATH
+$env:PYTHONUNBUFFERED = "1"
+$argList = @(
+  "-u", "-m", "soccer_highlights.cli",
+  "--source-dir", '"G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Raw"',
+  "pre-label",
+  "--out-dir", '"G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Tests/pre_label"',
+  "--fps", "15",
+  "--lrf-cache-dir", '"C:/local/lrf/<date>"'
+)
+Start-Process -FilePath "C:\dev\soccer-highlights\.venv\Scripts\python.exe" -ArgumentList $argList `
+  -WorkingDirectory "C:\dev\soccer-highlights" `
+  -RedirectStandardOutput "C:\local\lrf\pre_label_out.log" -RedirectStandardError "C:\local\lrf\pre_label_err.log" `
+  -WindowStyle Hidden -PassThru
+```
+**Each path-bearing argument must be its own array element wrapped in embedded
+double-quotes** (`'"G:/My Drive/..."'`) -- `Start-Process -ArgumentList` joins
+array elements with spaces without preserving quoting otherwise, so an
+unquoted path with spaces silently splits into multiple argv tokens and
+argparse fails with a confusing `invalid choice` error pointing at a path
+fragment. Poll progress with `Get-Process -Id <pid> -ErrorAction
+SilentlyContinue` (gone = exited) and by tailing the redirected log files --
+don't wrap this launch in the Bash tool's `run_in_background` at all, since
+that's the thing being worked around. Use a fresh pair of `-Redirect*` log
+filenames per retry round (`_out2.log`, `_out3.log`, ...) so you can tell
+rounds apart.
+
+Separately: on a same-day freshly-uploaded game, reading `.LRF`/`.MP4`
+directly off the Google Drive path during detection can be extremely slow
+(one Aug-30 attempt sat for 20+ min with zero output before being killed,
+`ffprobe` metadata reads were fast (~1.7s) but the ffmpeg audio-decode child
+hadn't even started yet) -- always do the `robocopy ... *.LRF` local-cache
+step (already documented at Step 0/Step 1's `--lrf-cache-dir`) proactively for
+a same-day game, not just when you actually see the `STATUS_IN_PAGE_ERROR`
+symptom. `robocopy` exits with code 1 on a normal successful copy (its
+convention for "files copied", not failure) -- don't read that as an error.
 
 ### Step 1b -- rename candidates into review order (`name-candidates`)
 
@@ -213,7 +293,11 @@ within a score band) instead of burying the good clips among the 2s.
 - Renaming after posting would break `.telegram_sent.json`'s double-post
   protection (it keys on `clip_file`). Order is always rename -> export -> post.
 
-### Step 2 -- fill in verdict/notes, but DO NOT edit `review_sheet.csv` in Excel
+### Step 2 (optional, full-eval runs only) -- fill in verdict/notes, but DO NOT edit `review_sheet.csv` in Excel
+
+**Skip this step for a normal quick-share run** -- see the mode note at the
+top of Part 3. Only do this when the goal is building/refreshing labeled
+ground truth for evals.md Part B.
 
 Watch the clips in `Tests\pre_label\candidates\`, fill in each row's `verdict`
 (same 1-5 highlight-worthiness scale Gemini uses) and `notes` columns. Use
@@ -240,8 +324,12 @@ edit in Excel:
 
 No command for this -- read the ranked sheet, watch clips as needed, decide which
 `clip_file`s are the real highlights. Typically the score>=4 clips plus any
-score-3 clips whose `notes` make them worth including (a near-miss, a funny
-moment, etc.) -- gemini_score is a triage aid, not the final word.
+score-3 clips whose `notes`/`gemini_description` make them worth including (a
+near-miss, a funny moment, etc.) -- gemini_score is a triage aid, not the
+final word. **On a quick-share run this is the actual decision step** (no
+`verdict` column to lean on) -- Kaveh watches the higher-ranked clips
+directly and picks off the ranked order + `gemini_description`/caption text,
+same judgment call as Step 2 would use, just not written back to the sheet.
 
 ### Step 4 -- export share-quality clips (`export-picks`)
 
@@ -382,3 +470,6 @@ clips also keeps any single failure cheap, and the sent-file makes resuming free
 | Clip too long to render in one run | ~37x realtime means >15s of footage blows a 10-min timeout | `scripts/seg_render.py`, rerun until `DONE` |
 | Exported clip over 50MB | One global CRF can't fit both long and short clips; size varies ~5x with motion | Per-clip CRF (Step 4 table); re-measure, don't extrapolate the +6-CRF rule |
 | `telegram-post` times out mid-upload | `request_timeout_seconds` covers the whole upload | Default is now 900s; raise via `SOCCER_HL__TELEGRAM__REQUEST_TIMEOUT_SECONDS`, post in small batches |
+| `pre-label` background run killed with zero output | The Bash tool's own `run_in_background` tracking, not the OS/Drive/sleep | Launch detached via PowerShell `Start-Process` instead (Step 1); poll `Get-Process -Id` + the redirected log file |
+| `descriptions_cache.json` progress looks higher than it is | Each entry is always a dict, so `v is not None` over the list is always true | Check the nested field: `v.get('describe') is None` per entry |
+| `pre-label` detection hangs with zero output on a same-day game | Reading `.LRF`/`.MP4` straight off Drive for a freshly-uploaded game can be very slow | `robocopy` the `.LRF`s local first (`--lrf-cache-dir`) proactively, don't wait for the `STATUS_IN_PAGE_ERROR` symptom |

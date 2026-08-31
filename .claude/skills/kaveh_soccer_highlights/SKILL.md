@@ -74,6 +74,14 @@ with the Farsi caption.
   workflow is scanning the whole ranked sheet, not trusting `score>=4` as a hard
   cutoff. Don't design features around a hard threshold without checking this is
   still true.
+- **Most weeks are "quick share," not "full eval" -- don't assume `verdict`/
+  `notes` get filled in.** The common case is posting highlights soon after
+  the game, picking clips straight off `gemini_score` + `gemini_description`
+  with the `verdict`/`notes` columns left blank -- that labeling pass is only
+  needed later, occasionally, when actually tuning the prompt (evals.md Part
+  B). See processing.md Part 3's mode note. Don't treat an unlabeled
+  `review_sheet.csv` as unfinished or broken, and don't assume a sheet with
+  posted clips already has ground-truth verdicts in it.
 - **`_DESCRIBE_PROMPT_V2` / `gemini-flash-latest` / fps=10 / schema-enforced JSON**
   is the current production default (`generate_description`'s defaults, set
   2026-07-31) -- validated via a 4-profile sweep against 66 real hand-labeled
