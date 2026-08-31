@@ -267,6 +267,22 @@ class LabelAuditConfig:
 
 
 @dataclass
+class MarksConfig:
+    # ingest-marks: live-tagged marks (watch presses, or any other source
+    # emitting wall-clock timestamps + a category) are trailing -- pressed
+    # AFTER the event, not during it -- unlike an audio peak, which IS the
+    # transient. Lag varies by category: a goal has a natural dead-ball
+    # pause (retrieve ball, walk back, restart) so realistically +10 to
+    # +45s; a mid-flow "moment" has no stoppage, so later and less
+    # reliable. Both windows are asymmetric and generous by default --
+    # tune per-category once real watch data exists, don't guess further.
+    goal_lookback_seconds: float = 60.0
+    goal_lookahead_seconds: float = 5.0
+    moment_lookback_seconds: float = 60.0
+    moment_lookahead_seconds: float = 5.0
+
+
+@dataclass
 class TelegramConfig:
     # Posts final, hand-picked export clips to a Telegram group (Bot API
     # sendVideo, direct HTTP call -- no SDK, matching this project's existing
@@ -305,6 +321,7 @@ class Config:
     vision: VisionConfig = field(default_factory=VisionConfig)
     gemini: GeminiConfig = field(default_factory=GeminiConfig)
     label_audit: LabelAuditConfig = field(default_factory=LabelAuditConfig)
+    marks: MarksConfig = field(default_factory=MarksConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
 
 

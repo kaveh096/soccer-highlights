@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 _NAME_RE = re.compile(r"^DJI_(?P<timestamp>\d{14})_(?P<seq>\d+)_D$")
@@ -97,3 +97,33 @@ def discover_chunks(source_dir: str | Path) -> list[Chunk]:
         previous_end_wallclock = start_time.fromtimestamp(start_time.timestamp() + duration)
 
     return chunks
+
+
+def wallclock_to_global(w: datetime, chunks: list[Chunk]) -> float | None:
+    """Inverse of the recorded-time axis global_start_seconds is built on:
+    map a wall-clock instant back to a global-timeline offset.
+
+    global_start_seconds accumulates durations alone (continuous-recording
+    assumption), so it drifts from real wall-clock time by however long the
+    camera was stopped between chunks (41.5 min across one 110.3 min game).
+    An externally-timestamped mark (a watch press, a DJI highlight) has to
+    be re-anchored through the owning chunk's own filename timestamp instead
+    of naively subtracting session start, exactly like cli.py's
+    `_wall_clock_tag` does in the other direction.
+
+    ``w`` must be a naive datetime already in the recording's local time
+    zone (chunks' start_time is naive, parsed straight from the DJI
+    filename with no timezone info -- see soccer_highlights.marks for the
+    explicit LA-timezone pinning callers are expected to have done first).
+
+    Returns ``None`` if ``w`` falls before the first chunk, after the last
+    chunk, or inside an unrecorded gap between two chunks (camera stopped
+    and restarted) -- the caller must report "marked but not recorded"
+    rather than silently mapping to the wrong offset."""
+    for chunk in chunks:
+        chunk_end = chunk.start_time + timedelta(seconds=chunk.duration_seconds)
+        if chunk.start_time <= w < chunk_end:
+            return chunk.global_start_seconds + (w - chunk.start_time).total_seconds()
+        if w < chunk.start_time:
+            return None
+    return None

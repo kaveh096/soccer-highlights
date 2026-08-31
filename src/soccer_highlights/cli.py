@@ -31,6 +31,9 @@ Subcommands:
                   as the post caption. --dry-run validates without
                   posting. Tracks sent clips in a state file next to the
                   clips so a rerun doesn't double-post.
+  telegram-message - post a one-off plain-text announcement to the same
+                  group (no video), via sendMessage. Prefer --text-file
+                  over --text for non-ASCII/Farsi text.
   golden-score  - score the current strategy/config against a pre-built
                   golden event set (golden.py), audio-only, no rendering
                   or human review needed. For re-checking tuning changes
@@ -79,6 +82,20 @@ Subcommands:
                   (+events.json) in the same batch-review-compatible
                   shape, plus a bonus gemini_description column, for a
                   first labeling pass.
+  ingest-marks  - report-only v1 (2026-08-31) of the live-tagging ingest
+                  (see marks.py): parse a wall-clock marks CSV
+                  (timestamp/category/sequence -- white_goal/black_goal/
+                  moment, undo resolved by dropping the row it cancels),
+                  map each mark onto the global recording timeline via
+                  discovery.wallclock_to_global, and classify it as
+                  snapped-to-an-existing-audio-peak, fixed-window fallback
+                  (no nearby peak -- the actual recall gain), or landed in
+                  an unrecorded gap between chunks. Runs audio detection to
+                  get peaks to snap against, but does NOT render any clips
+                  or write events.json yet -- this only proves the mapping
+                  is correct against real data before it feeds pre-label's
+                  candidate set. Also prints the watch's white/black tally
+                  for the free score-checksum sanity check.
 """
 
 from __future__ import annotations
@@ -94,7 +111,7 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from soccer_highlights import clipping, label_audit, render, telegram, vision, vision_eval, vision_gemini
+from soccer_highlights import clipping, label_audit, marks, render, telegram, vision, vision_eval, vision_gemini
 from soccer_highlights.audio import extract_audio_samples
 from soccer_highlights.config import Config, load_config, load_strategy_configs
 from soccer_highlights.detection import analyze
@@ -389,6 +406,29 @@ def cmd_telegram_post(
 
     if not dry_run:
         print(f"\nDone. {len(sent_state)} clip(s) recorded as sent in {sent_state_path}")
+
+
+def cmd_telegram_message(cfg: Config, text: str, text_file: str | None, dry_run: bool) -> None:
+    """Post a one-off plain-text announcement to the same Telegram group
+    telegram-post sends clips to -- e.g. a note about where to find raw
+    footage. Prefer --text-file for anything non-ASCII (Farsi): passing RTL
+    text as a raw CLI argument risks shell/console encoding mangling it
+    before Python ever sees it, the same class of problem as Step 2's Excel
+    mojibake warning."""
+    if text_file:
+        text = Path(text_file).read_text(encoding="utf-8").strip()
+    if not text:
+        raise SystemExit("telegram-message needs non-empty text via --text or --text-file")
+
+    if dry_run:
+        bot_info = telegram.get_me(cfg.telegram)
+        print(f"[DRY RUN] would send as @{bot_info.get('username', '?')}: {text}")
+        return
+
+    bot_info = telegram.get_me(cfg.telegram)
+    print(f"Connected as @{bot_info.get('username', '?')}")
+    result = telegram.send_message(text, cfg.telegram)
+    print(f"Sent message_id={result['result']['message_id']}")
 
 
 def _print_golden_score(score: GoldenScore, game_duration: float) -> None:
@@ -819,6 +859,48 @@ def cmd_name_candidates(cfg: Config, candidates_dir: str, revert: bool = False) 
             print(f"  ... {len(rows) - 10} more")
 
 
+def cmd_ingest_marks(cfg: Config, marks_csv: str, out: str | None, final_score: str | None) -> None:
+    chunks = discover_chunks(cfg.input.source_dir)
+    raw_marks = marks.load_marks_csv(marks_csv)
+    active_marks = marks.resolve_undos(raw_marks)
+    undone = len(raw_marks) - len(active_marks)
+
+    merged, _traces = _run_detection(cfg, chunks)
+    audio_peaks = [p for interval in merged for p in interval.peaks]
+
+    resolved = marks.resolve_marks(active_marks, chunks, audio_peaks, cfg.marks, cfg.timeline)
+
+    n_peak = sum(1 for r in resolved if r.anchor == "audio_peak")
+    n_fixed = sum(1 for r in resolved if r.anchor == "fixed_window")
+    n_gap = sum(1 for r in resolved if r.anchor == "unrecorded_gap")
+    print(f"{len(raw_marks)} row(s) in {marks_csv} -> {len(active_marks)} active mark(s) ({undone} undone)")
+    print(f"  {n_peak} snapped to an existing audio peak (audio would likely have found these anyway)")
+    print(f"  {n_fixed} had no nearby audio peak -- fixed-window fallback (this IS the recall gain)")
+    if n_gap:
+        print(f"  {n_gap} landed in an UNRECORDED GAP between chunks -- marked but not recorded, no clip possible")
+
+    for r in resolved:
+        local = r.mark.timestamp.astimezone(marks.RECORDING_TZ)
+        if r.global_seconds is None:
+            print(f"  seq={r.mark.sequence:>3} {r.mark.category:<10} {local:%H:%M:%S}  -> UNRECORDED GAP")
+        else:
+            print(
+                f"  seq={r.mark.sequence:>3} {r.mark.category:<10} {local:%H:%M:%S}  -> global={r.global_seconds:8.1f}s "
+                f"[{r.anchor:<12}] window=({r.interval.start_seconds:.1f}, {r.interval.end_seconds:.1f})"
+            )
+
+    white = sum(1 for r in active_marks if r.category == "white_goal")
+    black = sum(1 for r in active_marks if r.category == "black_goal")
+    print(f"\nWatch tally: white {white} - black {black}")
+    if final_score:
+        print(f"Confirm final score was {final_score} -- a mismatch means presses were missed or mis-tapped.")
+
+    if out:
+        out_path = Path(out)
+        marks.write_ingest_report_csv(resolved, out_path)
+        print(f"\nWrote {out_path}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sunday Soccer Highlights Engine")
     parser.add_argument("--config", type=str, default=None, help="Path to a config YAML file (default: config/default.yaml)")
@@ -881,6 +963,19 @@ def main() -> None:
     )
     telegram_post_parser.add_argument(
         "--dry-run", action="store_true", help="Validate files/captions/credentials and print what would be sent, without posting"
+    )
+    telegram_message_parser = subparsers.add_parser(
+        "telegram-message",
+        help="Post a one-off plain-text announcement to the Telegram group (no video attachment) via sendMessage.",
+    )
+    telegram_message_parser.add_argument(
+        "--text", default=None, help="Message text (prefer --text-file for non-ASCII/Farsi to avoid shell encoding issues)"
+    )
+    telegram_message_parser.add_argument(
+        "--text-file", default=None, help="Path to a UTF-8 file containing the message text (takes priority over --text)"
+    )
+    telegram_message_parser.add_argument(
+        "--dry-run", action="store_true", help="Validate credentials and print what would be sent, without posting"
     )
     golden_score_parser = subparsers.add_parser(
         "golden-score", help="Score the current --strategy/config against a pre-built golden event set (no rendering)"
@@ -965,6 +1060,23 @@ def main() -> None:
         help="Restore canonical clip_NNN.mp4 names (run this before re-running pre-label on a renamed folder)",
     )
 
+    ingest_marks_parser = subparsers.add_parser(
+        "ingest-marks",
+        help="Report-only: map a wall-clock marks CSV onto the recording timeline, classify each mark "
+        "as audio-peak-snapped/fixed-window/unrecorded-gap, print the white/black tally checksum",
+    )
+    ingest_marks_parser.add_argument(
+        "--marks-csv", required=True, help="CSV with timestamp (ISO 8601 + UTC offset), category, sequence columns"
+    )
+    ingest_marks_parser.add_argument(
+        "--out", default=None, help="Optional path to also write the resolved-marks report as a CSV"
+    )
+    ingest_marks_parser.add_argument(
+        "--final-score",
+        default=None,
+        help="Known final score e.g. '6-4' (white-black), printed alongside the watch tally as a free correctness checksum",
+    )
+
     args = parser.parse_args()
     cfg = load_config(args.config)
     if args.source_dir:
@@ -990,6 +1102,8 @@ def main() -> None:
         cmd_telegram_post(
             cfg, args.review_sheet, args.clips_dir, [c.strip() for c in args.clips.split(",")], args.dry_run
         )
+    elif args.command == "telegram-message":
+        cmd_telegram_message(cfg, args.text, args.text_file, args.dry_run)
     elif args.command == "golden-score":
         cmd_golden_score(cfg, args.golden_events, args.vision)
     elif args.command == "vision-highlights":
@@ -1002,6 +1116,8 @@ def main() -> None:
         cmd_pre_label(cfg, args.out_dir, args.lrf_cache_dir, args.fps)
     elif args.command == "name-candidates":
         cmd_name_candidates(cfg, args.candidates_dir, args.revert)
+    elif args.command == "ingest-marks":
+        cmd_ingest_marks(cfg, args.marks_csv, args.out, args.final_score)
 
 
 if __name__ == "__main__":

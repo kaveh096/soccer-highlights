@@ -14,6 +14,7 @@ dependencies = [
     "matplotlib",
     "anthropic",
     "python-dotenv",
+    "tzdata",
 ]
 
 [project.scripts]

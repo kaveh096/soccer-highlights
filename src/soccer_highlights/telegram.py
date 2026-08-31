@@ -47,14 +47,7 @@ def _multipart_body(fields: dict[str, str], file_field: str, file_path: Path) ->
     return b"".join(parts), f"multipart/form-data; boundary={boundary}"
 
 
-def _post(method: str, cfg: TelegramConfig, fields: dict[str, str], file_field: str, file_path: Path) -> dict:
-    token = os.environ.get(cfg.bot_token_env)
-    if not token:
-        raise TelegramError(f"{cfg.bot_token_env} is not set")
-    url = _API_URL.format(token=token, method=method)
-    body, content_type = _multipart_body(fields, file_field, file_path)
-    request = urllib.request.Request(url, data=body, headers={"Content-Type": content_type}, method="POST")
-
+def _send_with_retry(request: urllib.request.Request, cfg: TelegramConfig, method: str) -> dict:
     last_exc: Exception | None = None
     for attempt in range(cfg.max_retries + 1):
         try:
@@ -77,7 +70,17 @@ def _post(method: str, cfg: TelegramConfig, fields: dict[str, str], file_field: 
             last_exc = exc
             if attempt < cfg.max_retries:
                 time.sleep(2**attempt)
-    raise TelegramError(f"sendVideo failed: {last_exc}") from last_exc
+    raise TelegramError(f"{method} failed: {last_exc}") from last_exc
+
+
+def _post(method: str, cfg: TelegramConfig, fields: dict[str, str], file_field: str, file_path: Path) -> dict:
+    token = os.environ.get(cfg.bot_token_env)
+    if not token:
+        raise TelegramError(f"{cfg.bot_token_env} is not set")
+    url = _API_URL.format(token=token, method=method)
+    body, content_type = _multipart_body(fields, file_field, file_path)
+    request = urllib.request.Request(url, data=body, headers={"Content-Type": content_type}, method="POST")
+    return _send_with_retry(request, cfg, method)
 
 
 def get_me(cfg: TelegramConfig) -> dict:
@@ -107,3 +110,21 @@ def send_video(video_path: Path, caption: str, cfg: TelegramConfig) -> dict:
 
     fields = {"chat_id": chat_id, "caption": caption, "supports_streaming": "true"}
     return _post("sendVideo", cfg, fields, "video", video_path)
+
+
+def send_message(text: str, cfg: TelegramConfig) -> dict:
+    """Post a plain text announcement (no attachment) to the configured
+    chat -- e.g. a note alongside a batch of posted clips, not a per-clip
+    caption. JSON body via sendMessage, unlike sendVideo's multipart --
+    there's no file to attach."""
+    token = os.environ.get(cfg.bot_token_env)
+    if not token:
+        raise TelegramError(f"{cfg.bot_token_env} is not set")
+    chat_id = os.environ.get(cfg.chat_id_env)
+    if not chat_id:
+        raise TelegramError(f"{cfg.chat_id_env} is not set")
+
+    url = _API_URL.format(token=token, method="sendMessage")
+    payload = json.dumps({"chat_id": chat_id, "text": text}).encode("utf-8")
+    request = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    return _send_with_retry(request, cfg, "sendMessage")
