@@ -227,6 +227,20 @@ Don't keep re-tuning against this same 66-row Jul-26 dataset indefinitely --
 overfitting to one game's specific clips is a real risk. Revisit these two
 open items once a new game's labeled data is available.
 
+**A third gap, spotted 2026-08-31 from Aug-30's quick-share pick (not a
+formal eval pass, just Kaveh's own viewing):** `r20_s3_819a_c017.mp4` was a
+real goal that Gemini scored 3, one point below the tier-4 "any goal" floor
+-- out of 11 near-field goals in the game, this was the only miss (10 of 11
+already scored >=4 by rank 15; the 11th was this rank-20 clip). Distinct from
+the two gaps above (not a tier-5/skillful-goal miss, not a keeper-save
+wording issue) -- this is `goal_this_end` apparently not firing (or firing
+but not lifting the score) on a real, correctly-recorded goal. n=1, not
+enough to design a targeted fix around yet, but worth checking this specific
+clip's `gemini_description`/`rationale` against the video next time a formal
+eval pass runs on this game's data (fill in `verdict`/`notes` per
+processing.md's full-eval mode note first -- this game's sheet is currently
+unlabeled, a quick-share run).
+
 ---
 
 ## A third, different eval: is the ground truth itself wrong?

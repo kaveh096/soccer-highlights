@@ -81,9 +81,12 @@ class DetectionConfig:
 
 @dataclass
 class TimelineConfig:
-    lookback_seconds: float = 6.0
+    # See config/default.yaml's timeline block for the rationale/history
+    # behind these two -- raised 2026-08-31 (Kaveh's explicit request after
+    # the Aug-30 game), not re-swept against golden_events.
+    lookback_seconds: float = 9.0
     post_peak_seconds: float = 5.0
-    min_gap_seconds: float = 5.0
+    min_gap_seconds: float = 10.0
     min_interval_seconds: float = 5.0
     # Ignore any peak before this point in the whole session -- camera
     # handling/setup noise at recording start isn't a real event.

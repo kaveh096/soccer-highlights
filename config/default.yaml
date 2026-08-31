@@ -56,12 +56,21 @@ timeline:
   # social-media-friendly (round 2): round 1 used a 45s lookback and human
   # review found the interesting moment was routinely 30+ seconds into the
   # clip -- too much dead air before the payoff.
-  lookback_seconds: 6.0
+  # Raised 6.0 -> 9.0 (2026-08-31, Kaveh's explicit request after the Aug-30
+  # game): the pre-peak setup/buildup before a goal was routinely cut too
+  # short at 6s. Not re-swept against golden_events -- if this needs
+  # revisiting, re-check against a future game's ground truth.
+  lookback_seconds: 9.0
   # Seconds of context to keep after each detected peak.
   post_peak_seconds: 5.0
   # Minimum silence gap (seconds) required between two intervals for them to
   # stay separate; anything closer gets merged into one continuous highlight.
-  min_gap_seconds: 5.0
+  # Raised 5.0 -> 10.0 (2026-08-31, Kaveh's explicit request): he liked
+  # Aug-30's r09 clip, which merged two separate moments into one continuous
+  # highlight, and wants more of that to happen. Not re-swept against
+  # golden_events -- more merging also means fewer, longer candidate clips,
+  # worth checking recall/precision doesn't regress on a future game.
+  min_gap_seconds: 10.0
   # Drop any merged interval shorter than this (guards against edge noise).
   min_interval_seconds: 5.0
 
