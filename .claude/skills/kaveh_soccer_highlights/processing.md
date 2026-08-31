@@ -452,6 +452,36 @@ clips also keeps any single failure cheap, and the sent-file makes resuming free
 `--review-sheet` here only needs `clip_file`/`gemini_caption` -- point it at the
 **original** `review_sheet.csv`, not an Excel-edited copy (Step 2's warning).
 
+### Step 5b (optional) -- announce where the raw footage lives (`telegram-message`)
+
+Kaveh sometimes also uploads the full, unedited game footage to a Google
+Drive folder and wants a short Farsi text message posted to the group
+pointing players at it -- separate from the per-clip highlight posts, and
+not every week. Use `telegram-message` (added 2026-08-31), not
+`telegram-post` -- this is a one-off plain-text `sendMessage`, no video
+attachment:
+
+```bash
+cd C:/dev/soccer-highlights
+PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe -m soccer_highlights.cli \
+  telegram-message \
+  --text-file "<path to a UTF-8 .txt with the Farsi message>" \
+  --dry-run
+```
+then the same command minus `--dry-run` to actually send. **Always write the
+Farsi text to a UTF-8 file first and pass `--text-file`, not `--text` with
+the message inline on the command line** -- passing RTL text as a raw shell
+argument risks the same class of console/shell-encoding mangling as Step 2's
+Excel mojibake warning, and there's no `.telegram_sent.json`-style guard
+against a duplicate send here, so get the dry-run output right before
+sending for real. The Aug-30 game's message (a template to adapt, not a
+fixed script):
+
+```
+سلام به همه بچه‌ها! ویدیوهای کامل و خام بازی این هفته رو می‌تونید توی این پوشه گوگل درایو ببینید:
+<Google Drive folder link>
+```
+
 ---
 
 ## Known gotchas, quick index
