@@ -10,7 +10,7 @@ from pathlib import Path
 
 from soccer_highlights.clipping import concat_clips
 from soccer_highlights.config import ExportConfig, ReviewConfig
-from soccer_highlights.discovery import Chunk
+from soccer_highlights.discovery import Chunk, slice_start_epoch
 from soccer_highlights.timeline import ChunkSlice
 
 
@@ -19,6 +19,55 @@ def _scale_filter(max_width: int) -> str:
     # the source's aspect ratio, instead of forcing a fixed WxH that would
     # distort a 16:9 source.
     return f"scale={max_width}:-2"
+
+
+def _escape_filter_value(value: str) -> str:
+    """Quote a value (a font path, here) for use inside an ffmpeg filter-option
+    string, where ':' separates options.
+
+    Both halves are required on ffmpeg 8.1.2 (all three alternatives were tried
+    against the installed build on 2026-08-31): single-quoting alone leaves the
+    drive-letter colon acting as an option separator (`No option name near
+    '/Windows/Fonts/arial.ttf...'`), and backslash-escaping alone fails the same
+    way. Only quoted AND escaped parses. Backslashes are normalised to forward
+    slashes first -- Windows accepts them, and a literal '\\' is itself the
+    filtergraph escape character."""
+    return "'" + value.replace("\\", "/").replace(":", "\\:") + "'"
+
+
+def _drawtext_filter(cfg: ExportConfig, epoch_base: float) -> str:
+    """A drawtext stage burning the real time of day into every frame.
+
+    `%{pts\\:gmtime\\:EPOCH\\:FORMAT}` adds the frame's own presentation
+    timestamp (which restarts at ~0 for each `-ss`-trimmed piece) to a Unix
+    epoch, so the clock advances with the footage instead of showing the time
+    the render happened. `gmtime`, not `localtime`, deliberately: the epoch it
+    formats is a display value that already carries the recording's own local
+    wall clock (see discovery.slice_start_epoch, which is where that subtlety
+    is explained), so the burned-in time can't drift with the render machine's
+    OS timezone setting.
+
+    Font is passed as an explicit file path, never as a `font=<family>` name --
+    this ffmpeg build has fontconfig compiled in but no fontconfig config file
+    on Windows, so resolving a family name SEGFAULTS the whole process
+    (reproduced 2026-08-31 with `font=Arial`)."""
+    if ":" in cfg.burn_in_time_format:
+        raise ValueError(
+            f"burn_in_time_format must not contain ':' (got {cfg.burn_in_time_format!r}) -- "
+            "drawtext's %{pts:gmtime:...} expansion splits its own arguments on colons with a "
+            "hard 3-argument cap, so a colon here fails the render with "
+            "'%{pts} requires at most 3 arguments'. Use '.' or '-' separators."
+        )
+    text = f"%{{pts\\:gmtime\\:{epoch_base:.3f}\\:{cfg.burn_in_time_format}}}"
+    return (
+        f"drawtext=fontfile={_escape_filter_value(cfg.burn_in_font_path)}"
+        f":text='{text}'"
+        f":x={cfg.burn_in_margin_px}:y={cfg.burn_in_margin_px}"
+        f":fontsize={cfg.burn_in_font_size}:fontcolor=white"
+        # Semi-opaque box: outdoor footage swings from dark grass to bright
+        # sky, and plain white text disappears against the bright end.
+        f":box=1:boxcolor=black@0.5:boxborderw={cfg.burn_in_margin_px // 3}"
+    )
 
 
 def _run_ffmpeg(args: list[str]) -> None:
@@ -46,14 +95,27 @@ def is_playable(path: Path) -> bool:
     return result.returncode == 0 and result.stdout.strip() not in ("", "N/A")
 
 
-def _encode_piece(source_path: Path, start: float, duration: float, out_path: Path, cfg: ReviewConfig | ExportConfig) -> None:
+def _encode_piece(
+    source_path: Path,
+    start: float,
+    duration: float,
+    out_path: Path,
+    cfg: ReviewConfig | ExportConfig,
+    epoch_base: float | None = None,
+) -> None:
+    """Encode one piece. `epoch_base` (Unix epoch of the piece's first frame)
+    burns a wall-clock overlay on -- export path only; review clips never pass
+    one, so they stay clean."""
     audio_args = ["-ac", "1"] if cfg.mono_audio else []
+    video_filter = f"{_scale_filter(cfg.max_width)},fps={cfg.fps}"
+    if epoch_base is not None and isinstance(cfg, ExportConfig) and cfg.burn_in_time:
+        video_filter += f",{_drawtext_filter(cfg, epoch_base)}"
     _run_ffmpeg(
         [
             "-ss", f"{start:.3f}",
             "-i", str(source_path),
             "-t", f"{duration:.3f}",
-            "-vf", f"{_scale_filter(cfg.max_width)},fps={cfg.fps}",
+            "-vf", video_filter,
             "-c:v", "libx264", "-preset", cfg.preset, "-crf", str(cfg.crf), "-threads", str(cfg.threads),
             "-c:a", "aac", "-strict", "-2", "-b:a", f"{cfg.audio_bitrate_kbps}k", *audio_args,
             str(out_path),
@@ -86,16 +148,38 @@ def render_export_clip(slices: list[ChunkSlice], out_path: Path, tmp_dir: Path, 
     """Render a (possibly chunk-boundary-spanning) interval as one
     full-resolution, re-encoded delivery clip, always sourced from the
     full-res .MP4 (never the .LRF proxy) -- unlike render_review_clip,
-    this is meant for sharing, not just fast true/false-positive review."""
+    this is meant for sharing, not just fast true/false-positive review.
+
+    Each piece gets its own wall-clock epoch, derived from its owning chunk's
+    filename timestamp. For an interval spanning a chunk boundary that is the
+    correct behavior, not an approximation: the camera really was stopped
+    between those chunks, so the burned-in clock jumps by the length of the
+    gap rather than pretending the recording was continuous."""
     if len(slices) == 1:
         cs = slices[0]
-        _encode_piece(cs.chunk.mp4_path, cs.local_start_seconds, cs.local_end_seconds - cs.local_start_seconds, out_path, cfg)
+        epoch_base = slice_start_epoch(cs.chunk, cs.local_start_seconds)
+        _encode_piece(
+            cs.chunk.mp4_path,
+            cs.local_start_seconds,
+            cs.local_end_seconds - cs.local_start_seconds,
+            out_path,
+            cfg,
+            epoch_base,
+        )
         return
 
     part_paths: list[Path] = []
     for i, cs in enumerate(slices):
         part_path = tmp_dir / f"{out_path.stem}_part{i}.mp4"
-        _encode_piece(cs.chunk.mp4_path, cs.local_start_seconds, cs.local_end_seconds - cs.local_start_seconds, part_path, cfg)
+        epoch_base = slice_start_epoch(cs.chunk, cs.local_start_seconds)
+        _encode_piece(
+            cs.chunk.mp4_path,
+            cs.local_start_seconds,
+            cs.local_end_seconds - cs.local_start_seconds,
+            part_path,
+            cfg,
+            epoch_base,
+        )
         part_paths.append(part_path)
 
     concat_clips(part_paths, out_path, force_reencode=False)

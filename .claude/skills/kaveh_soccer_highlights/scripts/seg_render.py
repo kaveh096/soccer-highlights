@@ -61,7 +61,7 @@ sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from soccer_highlights import render  # noqa: E402
 from soccer_highlights.config import load_config  # noqa: E402
-from soccer_highlights.discovery import discover_chunks  # noqa: E402
+from soccer_highlights.discovery import discover_chunks, slice_start_epoch  # noqa: E402
 from soccer_highlights.timeline import Interval, map_interval_to_chunks  # noqa: E402
 
 
@@ -102,13 +102,19 @@ def main() -> None:
     # Flatten the per-chunk slices into sub-segments short enough to finish
     # inside one invocation. Chunk boundaries are honoured first so a segment
     # never straddles two source files.
-    segments: list[tuple[Path, float, float]] = []
+    # Each segment carries its own wall-clock epoch (its owning chunk's
+    # filename timestamp + its offset into that chunk), so the burned-in
+    # time-of-day overlay stays continuous across a clip that was cut into
+    # segments -- without this, every segment would restart the clock at the
+    # clip's own start time, and long clips (the only ones that come through
+    # here) would read wrong.
+    segments: list[tuple[Path, float, float, float]] = []
     for cs in slices:
         remaining = cs.local_end_seconds - cs.local_start_seconds
         pos = cs.local_start_seconds
         while remaining > 1e-6:
             take = min(args.seg_seconds, remaining)
-            segments.append((cs.chunk.mp4_path, pos, take))
+            segments.append((cs.chunk.mp4_path, pos, take, slice_start_epoch(cs.chunk, pos)))
             pos += take
             remaining -= take
 
@@ -117,14 +123,14 @@ def main() -> None:
     seg_paths = [seg_dir / f"seg{i:02d}.mp4" for i in range(len(segments))]
 
     rendered = 0
-    for i, ((src, start, dur), seg_path) in enumerate(zip(segments, seg_paths)):
+    for i, ((src, start, dur, epoch_base), seg_path) in enumerate(zip(segments, seg_paths)):
         if render.is_playable(seg_path):
             continue
         if rendered >= args.max_segments:
             break
         seg_path.unlink(missing_ok=True)  # drop a truncated leftover from a killed run
         print(f"Rendering seg {i + 1}/{len(segments)} of {args.clip}: {dur:.2f}s @ crf{args.crf}", flush=True)
-        render._encode_piece(src, start, dur, seg_path, cfg.export)
+        render._encode_piece(src, start, dur, seg_path, cfg.export, epoch_base)
         if not render.is_playable(seg_path):
             raise SystemExit(f"segment {i} came out unplayable -- rerun to retry it")
         rendered += 1

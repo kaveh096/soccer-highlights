@@ -351,6 +351,32 @@ default (18) **for this invocation only** -- it doesn't touch `config/default.ya
 or persist anywhere; the plain `export` command (every detected candidate, not just
 picks) still uses CRF 18 unless you pass the flag there too.
 
+**The wall-clock time of day is burned into every exported clip** (top-left,
+e.g. `Aug 30 07.46.36 AM`), added 2026-08-31. It's on by default; pass
+`--no-burn-in-time` to turn it off for one invocation. Only exports get it --
+`pre-label` review clips stay clean.
+
+- The clock is anchored per source chunk's own filename timestamp, not by
+  adding elapsed seconds to a session start, so it doesn't inherit the
+  continuous-recording drift that makes media time run early (same
+  re-anchoring `name-candidates` does -- the burned-in time and the clip's
+  `746a` name tag agree, which is a free sanity check on any exported clip).
+- A clip spanning a chunk boundary correctly **jumps** the clock across the
+  camera-stop gap rather than interpolating through it.
+- **Measured cost: none.** Paired local re-encodes came out at 80.3s (on) vs
+  81.1s (off) -- the overlay is below noise, and output size moved -0.04%, so
+  it doesn't change the CRF-vs-50MB calculus below. (Full export runs on this
+  laptop vary ±30% run to run from Drive I/O, so don't try to read the
+  overlay's cost out of an end-to-end export timing.)
+- Tunables live in `ExportConfig` (`burn_in_time`, `burn_in_time_format`,
+  `burn_in_font_path`, `burn_in_font_size`, `burn_in_margin_px`). Two hard
+  constraints, both verified against ffmpeg 8.1.2 and both documented in the
+  code: the time format **must not contain a `:`** (drawtext's
+  `%{pts:gmtime:...}` splits its own arguments on colons and dies with
+  `%{pts} requires at most 3 arguments`), and the font must be given as a
+  **file path, never a `font=<family>` name** (fontconfig has no config file
+  on this Windows box, so a family name segfaults ffmpeg outright).
+
 **Pick CRF per clip, not once for the batch.** Telegram's Bot API `sendVideo` has
 a hard **50MB** per-file limit, and that limit is *per file* -- so a single global
 CRF either busts the cap on the longest clip or throws away quality on all the
@@ -435,6 +461,12 @@ real Farsi, not `?` mojibake -- see Step 2's warning), bot credentials work
 printing Farsi captions to a cp1252 Windows console -- cosmetic only, doesn't
 affect what actually gets sent, but without it you can't read the dry-run output.
 
+**Clips arrive here already carrying the burned-in time of day** -- that
+happens in Step 4's export encode, not here. `telegram-post` is a pure upload
+and should stay one: it never re-encodes, so there's nothing to overlay at this
+stage. If a posted clip is missing the timestamp, the fix is upstream (re-export
+it), not a post-processing pass.
+
 **Then the real send**, same command minus `--dry-run`. Caption is each clip's
 `gemini_caption` (Farsi) from the review sheet. Successfully-sent clips are
 recorded in `<clips-dir>/.telegram_sent.json`; **a rerun skips anything already
@@ -502,4 +534,7 @@ fixed script):
 | `telegram-post` times out mid-upload | `request_timeout_seconds` covers the whole upload | Default is now 900s; raise via `SOCCER_HL__TELEGRAM__REQUEST_TIMEOUT_SECONDS`, post in small batches |
 | `pre-label` background run killed with zero output | The Bash tool's own `run_in_background` tracking, not the OS/Drive/sleep | Launch detached via PowerShell `Start-Process` instead (Step 1); poll `Get-Process -Id` + the redirected log file |
 | `descriptions_cache.json` progress looks higher than it is | Each entry is always a dict, so `v is not None` over the list is always true | Check the nested field: `v.get('describe') is None` per entry |
+| Export dies with `%{pts} requires at most 3 arguments` | A `:` in `export.burn_in_time_format` -- drawtext splits its own args on colons | Use `.`/`-` separators in the time format |
+| ffmpeg segfaults during an export | `font=<family>` needs fontconfig, which has no config file on this Windows box | Always give `burn_in_font_path` an explicit font FILE path |
+| Burned-in clock reads hours off (e.g. 8:46 AM shows as 3:46 PM) | Feeding a true UTC epoch to drawtext's `gmtime`, which then renders UTC | `slice_start_epoch` reinterprets the naive local DJI timestamp as UTC on purpose -- don't "fix" it into a real tz conversion |
 | `pre-label` detection hangs with zero output on a same-day game | Reading `.LRF`/`.MP4` straight off Drive for a freshly-uploaded game can be very slow | `robocopy` the `.LRF`s local first (`--lrf-cache-dir`) proactively, don't wait for the `STATUS_IN_PAGE_ERROR` symptom |

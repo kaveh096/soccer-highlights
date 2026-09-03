@@ -179,6 +179,29 @@ class ExportConfig:
     # to mono (a bug in the first cut of this config: it was forced mono
     # unconditionally, same as review clips, until caught 2026-07-25).
     mono_audio: bool = False
+    # Burn the real time of day into the shared clip (2026-08-31, Kaveh's
+    # request): viewers can tell WHEN in the game a moment happened, not just
+    # how long the clip is. Export path only -- review/pre-label clips are
+    # deliberately left clean (they're private triage, not shared output).
+    # The timestamp is anchored per source chunk's own filename timestamp, NOT
+    # by adding elapsed seconds to a session start, because the global
+    # timeline assumes continuous recording and drifts from real time by
+    # however long the camera was stopped between chunks (41.5 min across one
+    # 110.3 min game) -- see discovery.slice_start_epoch.
+    burn_in_time: bool = True
+    # strftime format for the overlay. MUST NOT contain a literal ':' --
+    # ffmpeg's drawtext `%{pts:gmtime:...}` expansion splits its own arguments
+    # on colons with a hard 3-argument cap, so any colon here (escaped or not)
+    # fails the whole render with "%{pts} requires at most 3 arguments".
+    # Verified against ffmpeg 8.1.2 on 2026-08-31; '.' separators sidestep it.
+    burn_in_time_format: str = "%b %d %I.%M.%S %p"
+    # An explicit font FILE, never a `font=<family>` name: this ffmpeg build
+    # has fontconfig compiled in but no fontconfig config file on Windows, so
+    # asking it to resolve a family name segfaults the whole ffmpeg process
+    # (reproduced with `font=Arial`, 2026-08-31) rather than erroring cleanly.
+    burn_in_font_path: str = "C:/Windows/Fonts/arial.ttf"
+    burn_in_font_size: int = 42
+    burn_in_margin_px: int = 24
 
 
 @dataclass

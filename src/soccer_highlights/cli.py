@@ -278,7 +278,7 @@ def cmd_score(cfg: Config) -> None:
     print(format_score_report(scores, ground_truth))
 
 
-def cmd_export(cfg: Config, out_dir_override: str | None) -> None:
+def cmd_export(cfg: Config, out_dir_override: str | None, burn_in_time: bool = True) -> None:
     """Detect, then re-encode (not stream-copy) each highlight interval
     from the full-res source at export.* settings -- a compressed,
     widely-compatible delivery copy for sharing, as opposed to render's
@@ -287,6 +287,8 @@ def cmd_export(cfg: Config, out_dir_override: str | None) -> None:
     merged, _traces = _run_detection(cfg, chunks)
 
     export_cfg = cfg.export
+    if not burn_in_time:
+        export_cfg.burn_in_time = False
     out_dir = Path(out_dir_override) if out_dir_override else Path(export_cfg.dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -308,7 +310,12 @@ def cmd_export(cfg: Config, out_dir_override: str | None) -> None:
 
 
 def cmd_export_picks(
-    cfg: Config, review_sheet_path: str, clip_files: list[str], out_dir_override: str | None, crf_override: int | None
+    cfg: Config,
+    review_sheet_path: str,
+    clip_files: list[str],
+    out_dir_override: str | None,
+    crf_override: int | None,
+    burn_in_time: bool = True,
 ) -> None:
     """Re-encode a user-specified subset of a review_sheet.csv's rows (by
     clip_file) from the full-res source at export.* settings -- for
@@ -328,6 +335,8 @@ def cmd_export_picks(
     export_cfg = cfg.export
     if crf_override is not None:
         export_cfg.crf = crf_override
+    if not burn_in_time:
+        export_cfg.burn_in_time = False
     out_dir = Path(out_dir_override) if out_dir_override else Path(export_cfg.dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -930,6 +939,11 @@ def main() -> None:
     export_parser.add_argument(
         "--out-dir", type=str, default=None, help="Override export.dir (where the compressed highlight_NNN.mp4 files go)"
     )
+    export_parser.add_argument(
+        "--no-burn-in-time",
+        action="store_true",
+        help="Disable the burned-in wall-clock time-of-day overlay (on by default via export.burn_in_time)",
+    )
     export_picks_parser = subparsers.add_parser(
         "export-picks",
         help="Re-encode a user-specified subset of an existing review_sheet.csv's rows (by clip_file) "
@@ -946,6 +960,11 @@ def main() -> None:
     )
     export_picks_parser.add_argument(
         "--crf", type=int, default=None, help="Override export.crf (higher = smaller file/lower quality), e.g. for a Telegram-size-limited copy"
+    )
+    export_picks_parser.add_argument(
+        "--no-burn-in-time",
+        action="store_true",
+        help="Disable the burned-in wall-clock time-of-day overlay (on by default via export.burn_in_time)",
     )
     telegram_post_parser = subparsers.add_parser(
         "telegram-post",
@@ -1095,9 +1114,16 @@ def main() -> None:
     elif args.command == "score":
         cmd_score(cfg)
     elif args.command == "export":
-        cmd_export(cfg, args.out_dir)
+        cmd_export(cfg, args.out_dir, burn_in_time=not args.no_burn_in_time)
     elif args.command == "export-picks":
-        cmd_export_picks(cfg, args.review_sheet, [c.strip() for c in args.clips.split(",")], args.out_dir, args.crf)
+        cmd_export_picks(
+            cfg,
+            args.review_sheet,
+            [c.strip() for c in args.clips.split(",")],
+            args.out_dir,
+            args.crf,
+            burn_in_time=not args.no_burn_in_time,
+        )
     elif args.command == "telegram-post":
         cmd_telegram_post(
             cfg, args.review_sheet, args.clips_dir, [c.strip() for c in args.clips.split(",")], args.dry_run

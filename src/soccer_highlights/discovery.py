@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 _NAME_RE = re.compile(r"^DJI_(?P<timestamp>\d{14})_(?P<seq>\d+)_D$")
@@ -127,3 +127,23 @@ def wallclock_to_global(w: datetime, chunks: list[Chunk]) -> float | None:
         if w < chunk.start_time:
             return None
     return None
+
+
+def slice_start_epoch(chunk: Chunk, local_start_seconds: float) -> float:
+    """Epoch value for the instant `local_start_seconds` into `chunk`, to feed
+    ffmpeg drawtext's ``%{pts\\:gmtime\\:...}`` when burning the time of day
+    into an exported clip (see soccer_highlights.render).
+
+    Forward counterpart to `wallclock_to_global` -- global/local offset out to
+    wall clock, rather than an external timestamp in.
+
+    **Deliberately not a true UTC instant.** The DJI filename timestamp
+    `chunk.start_time` already IS the local wall clock a viewer wants to read,
+    so it is reinterpreted as if it were UTC: formatting that with `gmtime`
+    reproduces exactly those digits. Converting it to a real UTC epoch instead
+    and formatting with `gmtime` burns in UTC (caught in testing 2026-08-31: an
+    8:46 AM game read "03.46 PM"), and formatting with `localtime` would make
+    the output depend on the render machine's OS timezone. This way the burned-in
+    clock is machine-independent and needs no DST handling at all."""
+    local_dt = chunk.start_time + timedelta(seconds=local_start_seconds)
+    return local_dt.replace(tzinfo=timezone.utc).timestamp()

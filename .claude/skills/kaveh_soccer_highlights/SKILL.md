@@ -35,8 +35,8 @@ Raw multi-hour DJI recording -> audio peak detection finds candidate moments ->
 Gemini watches each candidate and scores it 1-5 for highlight-worthiness (+ writes
 an English description and a Farsi caption) -> Kaveh scans the whole ranked sheet
 himself and picks the real favorites (score is for *sorting*, not an automatic
-cutoff) -> the picks get re-encoded at share quality -> posted to a Telegram group
-with the Farsi caption.
+cutoff) -> the picks get re-encoded at share quality, with the wall-clock time of
+day burned into the video -> posted to a Telegram group with the Farsi caption.
 
 ## Where the deep history lives (don't duplicate it here)
 
@@ -74,6 +74,15 @@ with the Farsi caption.
   workflow is scanning the whole ranked sheet, not trusting `score>=4` as a hard
   cutoff. Don't design features around a hard threshold without checking this is
   still true.
+- **Time-of-day burn-in happens in the final share encode (processing.md Step
+  4), never as a separate pass and never at posting time.** `export-picks` /
+  `export` / `seg_render.py` all bake the clock in while re-encoding the pick,
+  so by the time Step 5's `telegram-post` runs, the clips already carry it --
+  posting is a pure upload and must stay that way. On by default;
+  `--no-burn-in-time` opts out per invocation. Review/pre-label clips
+  deliberately stay clean. Don't add a re-encode step after export to overlay a
+  timestamp: that would cost a second full generation loss on this laptop's
+  slowest path for something the export encode already does for free.
 - **Most weeks are "quick share," not "full eval" -- don't assume `verdict`/
   `notes` get filled in.** The common case is posting highlights soon after
   the game, picking clips straight off `gemini_score` + `gemini_description`
