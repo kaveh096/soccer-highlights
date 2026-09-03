@@ -106,6 +106,9 @@ All game footage lives on Google Drive, per game date, **not** in the repo
 ```
 G:\My Drive\Photos and Movies\Sunday Soccer\<date>\
   Raw\                              DJI_*_D.MP4 + .LRF  (capital "Raw")
+    tally_white_goal.csv            the three Tallies watch exports, one per
+    tally_black_goal.csv            counter -- live-tagged marks for this game
+    tally_moment.csv                (see Step 0b; absent if the watch wasn't used)
   Tests\
     pre_label\
       candidates\
@@ -114,9 +117,11 @@ G:\My Drive\Photos and Movies\Sunday Soccer\<date>\
                                          the SAME file a human watches, Gemini
                                          scores, and label-audit later re-checks
         review_sheet.csv                clip_file/start/end/duration/max_peak_score/
-                                         verdict/notes/gemini_score/gemini_caption/
-                                         gemini_description -- verdict/notes start
-                                         blank, fill them in during Part 3 Step 2
+                                         verdict/notes/source/gemini_score/
+                                         gemini_caption/gemini_description --
+                                         verdict/notes start blank, fill them in
+                                         during Part 3 Step 2. `source` is only
+                                         meaningful on a watch-tagged game (Step 0b)
         events.json                     raw detected intervals
         descriptions_cache.json         resumable Gemini describe-call cache
   Sharable\
@@ -167,6 +172,74 @@ a local copy:
 robocopy "G:\...\<date>\Raw" "C:\local\lrf\<date>" *.LRF /R:5 /W:15
 ```
 
+### Step 0b -- ASK KAVEH FOR THE WATCH TALLY EXPORTS
+
+**Do this every game, before Step 1, without waiting to be asked.** If Kaveh
+mentions a new game or points at a new `Raw\` folder, the first thing to check
+is whether the watch tallies came with it -- the exports are easy to forget
+(they're a separate manual step on the watch, done after the game is over and
+the phone is back in hand) and there is **no way to recover them later**. A
+game processed without them silently loses the recall measurement for good.
+
+Say something like: *"Did you export the Tallies counters for this game? They
+need to be in `<date>\Raw\`."*
+
+The ritual, for reference:
+1. On the watch, Tallies exports **one CSV per counter**, so there are
+   **three** files: white goal, black goal, moment.
+2. They land in Google Drive under whatever name Tallies gives them (a
+   free-form string like `soccer tally test - white goal - Sep 2.csv`).
+3. **Rename them to the stable convention** and put them in the game's `Raw\`
+   folder next to the DJI files: `tally_white_goal.csv`,
+   `tally_black_goal.csv`, `tally_moment.csv`. Nothing parses the filename --
+   the category is passed explicitly on the command line -- but a stable name
+   is what makes the Step 0c/Step 1 commands copy-pasteable between games.
+
+Putting them in `Raw\` is safe: `discover_chunks` globs `DJI_*_D.MP4` only and
+ignores everything else in the folder.
+
+**If the tallies are missing**, say so plainly and carry on -- everything below
+degrades to audio-only exactly as before. Don't silently skip the `--tally-csv`
+flags and let a `source`-less sheet imply the watch simply found nothing.
+
+### Step 0c -- measure the clap-sync offset (`ingest-marks`)
+
+Run this **before** Step 1, because Step 1 wants the resulting offset. It is
+report-only: it renders nothing and costs no API calls, just an audio-detection
+pass.
+
+```bash
+export PATH="/c/Users/Kaveh/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-8.1.2-full_build/bin:$PATH"
+cd C:/dev/soccer-highlights
+./.venv/Scripts/python.exe -m soccer_highlights.cli \
+  --source-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Raw" \
+  ingest-marks \
+  --tally-csv "white_goal=G:/.../<date>/Raw/tally_white_goal.csv" \
+  --tally-csv "black_goal=G:/.../<date>/Raw/tally_black_goal.csv" \
+  --tally-csv "moment=G:/.../<date>/Raw/tally_moment.csv" \
+  --final-score "<white>-<black>"
+```
+
+What to read off the output:
+
+- **The clap-sync residual.** Kaveh claps in front of the camera and taps
+  `moment` at the same instant at kickoff, so the two are simultaneous by
+  construction and any difference is watch-vs-camera clock skew. Since he
+  synced the camera RTC to his phone (2026-09-02) and the watch runs off the
+  same phone clock, **expect ~0**. DJI filename timestamps are only
+  1-second-resolution, so anything within ~2s is noise, not skew -- the command
+  says so itself and only suggests a correction past that. If it does suggest
+  one, pass it as `--clock-offset-seconds` to **both** this command and Step 1.
+- **"no audio peak within Ns of the first moment mark"** means either the clap
+  wasn't detected or the skew is bigger than the search window -- check whether
+  the camera RTC sync actually took before trusting any mark for that game.
+- **The white/black tally vs. the real final score.** Ask Kaveh for the score;
+  a mismatch means presses were missed or mis-tapped, and it's the only free
+  check on the watch data that exists. **Always ask** -- he always knows it.
+- **Marks in an unrecorded gap.** These were marked while the camera was
+  stopped between chunks. They can't be rendered at all; report them as
+  "marked but not recorded" rather than letting them vanish.
+
 ### Step 1 -- detect candidates + Gemini describe (`pre-label`)
 
 ```bash
@@ -176,8 +249,34 @@ cd C:/dev/soccer-highlights
   --source-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Raw" \
   pre-label \
   --out-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Tests/pre_label" \
-  [--lrf-cache-dir "C:/local/lrf/<date>"]
+  [--lrf-cache-dir "C:/local/lrf/<date>"] \
+  [--tally-csv "white_goal=G:/.../<date>/Raw/tally_white_goal.csv"] \
+  [--tally-csv "black_goal=G:/.../<date>/Raw/tally_black_goal.csv"] \
+  [--tally-csv "moment=G:/.../<date>/Raw/tally_moment.csv"] \
+  [--clock-offset-seconds <from Step 0c, usually omit>]
 ```
+
+**Pass the same `--tally-csv` flags here that Step 0c used.** They union the
+watch marks with the audio candidates, so a goal the watch caught but audio
+missed becomes a real rendered, Gemini-scored clip in the same sheet as
+everything else, and the sheet gains a **`source` column**:
+
+| `source` | meaning |
+|---|---|
+| `audio` | an audio candidate no mark corroborated |
+| `both` | an audio candidate a mark landed on -- audio found it too |
+| `mark` | **no audio peak near the mark: an event audio detection missed** |
+
+`mark` rows are the whole point of the watch. Counting them against the total
+real events is the recall number this project has never been able to measure.
+Provenance follows the mark's *anchor*, not interval overlap -- see
+`marks.union_with_audio`, which documents why crediting audio for a merely
+overlapping candidate would erase a real miss.
+
+Omitting the flags is a deliberate, tested no-op: no marks means behavior
+identical to the audio-only pipeline, so forgetting the watch degrades
+gracefully instead of breaking the week's run.
+
 Requires `GEMINI_API_KEY`. What it does, in order: audio peak detection
 (`onset_flux`) -> render each candidate at review quality from the `.LRF` -> a
 Gemini describe call per clip (`_DESCRIBE_PROMPT_V2`, `gemini-flash-latest`,
@@ -537,4 +636,8 @@ fixed script):
 | Export dies with `%{pts} requires at most 3 arguments` | A `:` in `export.burn_in_time_format` -- drawtext splits its own args on colons | Use `.`/`-` separators in the time format |
 | ffmpeg segfaults during an export | `font=<family>` needs fontconfig, which has no config file on this Windows box | Always give `burn_in_font_path` an explicit font FILE path |
 | Burned-in clock reads hours off (e.g. 8:46 AM shows as 3:46 PM) | Feeding a true UTC epoch to drawtext's `gmtime`, which then renders UTC | `slice_start_epoch` reinterprets the naive local DJI timestamp as UTC on purpose -- don't "fix" it into a real tz conversion |
+| Watch tallies missing for a game, found out too late | The exports are a separate manual step on the watch and can't be recovered afterwards | Ask at Step 0b, every game, before Step 1 -- never after |
+| `source` column absent or all `audio` | `--tally-csv` flags weren't passed to `pre-label` | Re-run Step 1 with them; don't read a `source`-less sheet as "the watch found nothing" |
+| Clap sync reports no peak near the moment mark | Clap not detected, or skew exceeds the search window | Check the camera RTC sync actually took before trusting that game's marks |
+| Marks reported "marked but not recorded" | Tapped while the camera was stopped between chunks | Nothing to render -- report them, don't let them silently vanish |
 | `pre-label` detection hangs with zero output on a same-day game | Reading `.LRF`/`.MP4` straight off Drive for a freshly-uploaded game can be very slow | `robocopy` the `.LRF`s local first (`--lrf-cache-dir`) proactively, don't wait for the `STATUS_IN_PAGE_ERROR` symptom |

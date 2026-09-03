@@ -299,10 +299,40 @@ class MarksConfig:
     # +45s; a mid-flow "moment" has no stoppage, so later and less
     # reliable. Both windows are asymmetric and generous by default --
     # tune per-category once real watch data exists, don't guess further.
+    #
+    # These are the FALLBACK clip windows -- used only when no audio peak is
+    # found to anchor on. Wide is the safe direction here: with no peak, a
+    # too-long clip is reviewable, a too-short one has missed the event.
     goal_lookback_seconds: float = 60.0
     goal_lookahead_seconds: float = 5.0
     moment_lookback_seconds: float = 60.0
     moment_lookahead_seconds: float = 5.0
+    # The peak-SEARCH window is deliberately much tighter than the fallback
+    # window above, and must stay that way (2026-09-02). Widening the search
+    # does NOT make snapping safer -- it makes it worse: resolve_marks anchors
+    # on the loudest peak in the window, and across a full minute of a soccer
+    # game the loudest peak is quite likely some unrelated shout/whistle/shot
+    # rather than the marked event, which would silently cut the wrong clip
+    # (worse than the honest wide fallback, because it looks precise).
+    #
+    # Sized from Kaveh's own Tallies bench test (2026-09-02): he estimates a
+    # ~5-10s press delay. This is his ESTIMATE from tapping at a desk, not a
+    # measured in-game figure -- the original design brief had assumed +10 to
+    # +45s for goals, so the two disagree by a lot and this has never been
+    # checked against a real game. The clap-sync ritual at the next game is
+    # what would actually measure it. Treat these as provisional.
+    snap_lookback_seconds: float = 15.0
+    snap_lookahead_seconds: float = 2.0
+    # Clap-sync search half-width (see marks.measure_clock_offset). Kaveh
+    # synced the camera RTC to his phone via DJI Mimo on 2026-09-02 and
+    # reports it agrees within ~1s, and the watch takes its clock from the
+    # same phone -- so the expected offset is ~0 and this window only has to
+    # be wide enough to prove that. It is deliberately much wider than that
+    # expectation so a FAILED sync still gets found rather than silently
+    # reported as "no clap detected"; note DJI filename timestamps are
+    # themselves only 1-second-resolution, so ~+/-2s is the realistic
+    # noise floor and an offset inside that is not worth correcting.
+    sync_window_seconds: float = 30.0
 
 
 @dataclass

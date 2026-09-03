@@ -653,7 +653,15 @@ def cmd_label_audit(cfg: Config, limit: int | None) -> None:
     print(f"Wrote {len(flagged)} flagged clip(s) to {clips_dir}")
 
 
-def cmd_pre_label(cfg: Config, out_dir: str, lrf_cache_dir: str | None = None, fps: int | None = None) -> None:
+def cmd_pre_label(
+    cfg: Config,
+    out_dir: str,
+    lrf_cache_dir: str | None = None,
+    fps: int | None = None,
+    marks_csv: str | None = None,
+    tally_csvs: list[str] | None = None,
+    clock_offset: float = 0.0,
+) -> None:
     """Detect candidates in a brand-new (not-yet-labeled) recording,
     render small/fast clips, generate a Gemini description for each (no
     judge step -- there's no prior human label yet to compare against),
@@ -676,7 +684,17 @@ def cmd_pre_label(cfg: Config, out_dir: str, lrf_cache_dir: str | None = None, f
     0xC0000006 STATUS_IN_PAGE_ERROR reading a freshly-uploaded Google
     Drive file) -- copy just the much-smaller .LRF proxies locally
     (e.g. via `robocopy source_dir lrf_cache_dir *.LRF /R:5 /W:15`,
-    which has its own retry logic) rather than the full-res source."""
+    which has its own retry logic) rather than the full-res source.
+
+    With --marks-csv/--tally-csv: live-tagged marks (see marks.py) are
+    UNIONED with the audio candidates before rendering, so a moment the
+    watch caught but audio missed becomes a real clip in the same sheet,
+    scored and captioned by the same Gemini pass as everything else. The
+    sheet gains a `source` column (audio / both / mark) -- `mark` rows are
+    exactly the events audio detection missed, which is the recall number
+    this whole feature exists to produce. Passing no marks leaves the
+    behavior identical to audio-only, deliberately: forgetting the watch
+    must degrade gracefully, never break the weekly run."""
     if not os.environ.get(cfg.gemini.api_key_env):
         raise SystemExit(f"pre-label requires {cfg.gemini.api_key_env} to be set (for Gemini descriptions).")
 
@@ -691,6 +709,20 @@ def cmd_pre_label(cfg: Config, out_dir: str, lrf_cache_dir: str | None = None, f
                 else:
                     print(f"WARNING: no local LRF cache for {chunk.lrf_path.name} in {cache_dir}, using {chunk.lrf_path}")
     merged, _traces = _run_detection(cfg, chunks)
+
+    sources = ["audio"] * len(merged)
+    if marks_csv or tally_csvs:
+        active_marks, _undone, source_label = _load_marks(marks_csv, tally_csvs)
+        audio_peaks = [p for interval in merged for p in interval.peaks]
+        resolved = marks.resolve_marks(active_marks, chunks, audio_peaks, cfg.marks, cfg.timeline, clock_offset)
+        n_gap = sum(1 for r in resolved if r.anchor == "unrecorded_gap")
+        merged, sources = marks.union_with_audio(merged, resolved)
+        n_mark = sources.count("mark")
+        n_both = sources.count("both")
+        print(
+            f"Unioned {len(active_marks)} mark(s) from {source_label}: {n_both} corroborated an audio candidate, "
+            f"{n_mark} added a NEW candidate audio missed, {n_gap} landed in an unrecorded gap (not renderable)"
+        )
 
     strategy_dir = Path(out_dir) / "candidates"
     strategy_dir.mkdir(parents=True, exist_ok=True)
@@ -729,8 +761,14 @@ def cmd_pre_label(cfg: Config, out_dir: str, lrf_cache_dir: str | None = None, f
     sheet_path = generate_review_sheet(strategy_dir)
     with open(sheet_path, encoding="utf-8") as f:
         sheet_rows = list(csv.DictReader(f))
-    fieldnames = list(sheet_rows[0].keys()) + ["gemini_score", "gemini_caption", "gemini_description"] if sheet_rows else []
-    for sheet_row, description in zip(sheet_rows, descriptions):
+    fieldnames = (
+        list(sheet_rows[0].keys()) + ["source", "gemini_score", "gemini_caption", "gemini_description"]
+        if sheet_rows
+        else []
+    )
+    # sheet_rows, descriptions and sources are all in `merged` order.
+    for sheet_row, description, source in zip(sheet_rows, descriptions, sources):
+        sheet_row["source"] = source
         sheet_row["gemini_score"] = description.score if description else ""
         sheet_row["gemini_caption"] = description.caption if description else ""
         sheet_row["gemini_description"] = description.description if description else ""
@@ -868,21 +906,71 @@ def cmd_name_candidates(cfg: Config, candidates_dir: str, revert: bool = False) 
             print(f"  ... {len(rows) - 10} more")
 
 
-def cmd_ingest_marks(cfg: Config, marks_csv: str, out: str | None, final_score: str | None) -> None:
-    chunks = discover_chunks(cfg.input.source_dir)
+def _load_marks(marks_csv: str | None, tally_csvs: list[str] | None) -> tuple[list[marks.Mark], int, str]:
+    """Load marks from either the generic marks CSV or one-or-more Tallies
+    per-counter exports, returning (active_marks, undone_count, source_label)."""
+    if tally_csvs:
+        per_category: list[marks.Mark] = []
+        raw_total = 0
+        for spec in tally_csvs:
+            if "=" not in spec:
+                raise SystemExit(f"--tally-csv expects CATEGORY=PATH, got {spec!r}")
+            category, _, path = spec.partition("=")
+            loaded = marks.load_tallies_csv(path, category.strip())
+            raw_total += len(loaded)
+            per_category.extend(loaded)
+        active = marks.merge_tally_marks(per_category)
+        # Tallies' minus button is resolved per-counter inside
+        # load_tallies_csv, so nothing is left for the global stack to undo.
+        return active, 0, ", ".join(s.split("=", 1)[1] for s in tally_csvs)
+
     raw_marks = marks.load_marks_csv(marks_csv)
-    active_marks = marks.resolve_undos(raw_marks)
-    undone = len(raw_marks) - len(active_marks)
+    active = marks.resolve_undos(raw_marks)
+    return active, len(raw_marks) - len(active), str(marks_csv)
+
+
+def cmd_ingest_marks(
+    cfg: Config,
+    marks_csv: str | None,
+    tally_csvs: list[str] | None,
+    out: str | None,
+    final_score: str | None,
+    clock_offset: float,
+) -> None:
+    chunks = discover_chunks(cfg.input.source_dir)
+    active_marks, undone, source_label = _load_marks(marks_csv, tally_csvs)
 
     merged, _traces = _run_detection(cfg, chunks)
     audio_peaks = [p for interval in merged for p in interval.peaks]
 
-    resolved = marks.resolve_marks(active_marks, chunks, audio_peaks, cfg.marks, cfg.timeline)
+    resolved = marks.resolve_marks(active_marks, chunks, audio_peaks, cfg.marks, cfg.timeline, clock_offset)
+
+    # Clap sync: measured against whatever offset is already applied, so a
+    # correctly-corrected run should report ~0 residual.
+    sync = marks.measure_clock_offset(resolved, audio_peaks, cfg.marks.sync_window_seconds)
+    if sync is not None:
+        print(
+            f"\nClap sync (moment mark seq={sync.mark.mark.sequence}): mark at "
+            f"{sync.mark.global_seconds:.1f}s, clap peak at {sync.peak.time_seconds:.1f}s "
+            f"-> residual offset {sync.offset_seconds:+.1f}s"
+        )
+        if abs(sync.offset_seconds) > 2.0:
+            print(
+                f"  Re-run with --clock-offset-seconds {clock_offset + sync.offset_seconds:+.1f} to correct every "
+                "mark. (DJI filename timestamps are 1s-resolution, so anything within ~2s is noise, not skew.)"
+            )
+    elif any(r.mark.category == "moment" for r in resolved):
+        print(
+            f"\nClap sync: no audio peak within {cfg.marks.sync_window_seconds:.0f}s of the first moment mark. "
+            "Either the clap wasn't detected, or the clock skew exceeds that window (check the camera RTC sync)."
+        )
+    else:
+        print("\nClap sync: no moment mark found -- clock skew unmeasured for this game.")
 
     n_peak = sum(1 for r in resolved if r.anchor == "audio_peak")
     n_fixed = sum(1 for r in resolved if r.anchor == "fixed_window")
     n_gap = sum(1 for r in resolved if r.anchor == "unrecorded_gap")
-    print(f"{len(raw_marks)} row(s) in {marks_csv} -> {len(active_marks)} active mark(s) ({undone} undone)")
+    print(f"{source_label} -> {len(active_marks)} active mark(s) ({undone} undone)")
     print(f"  {n_peak} snapped to an existing audio peak (audio would likely have found these anyway)")
     print(f"  {n_fixed} had no nearby audio peak -- fixed-window fallback (this IS the recall gain)")
     if n_gap:
@@ -1064,6 +1152,23 @@ def main() -> None:
         help="Redirect heavy .LRF reads to a local copy in this directory (source_dir's .MP4 files are still "
         "used for chunk discovery/duration, a small fast read) -- for an unreliable network/cloud source_dir",
     )
+    pre_label_parser.add_argument(
+        "--marks-csv", default=None, help="Union live-tagged marks (generic CSV) with the audio candidates"
+    )
+    pre_label_parser.add_argument(
+        "--tally-csv",
+        action="append",
+        default=None,
+        metavar="CATEGORY=PATH",
+        help="Union live-tagged marks from a Tallies per-counter export, e.g. white_goal='.../white goal.csv'. "
+        "Repeat once per counter. Adds a `source` column (audio/both/mark) to the review sheet",
+    )
+    pre_label_parser.add_argument(
+        "--clock-offset-seconds",
+        type=float,
+        default=0.0,
+        help="Seconds to add to every mark for watch-vs-camera clock skew (measure it first with ingest-marks)",
+    )
 
     name_candidates_parser = subparsers.add_parser(
         "name-candidates",
@@ -1085,7 +1190,15 @@ def main() -> None:
         "as audio-peak-snapped/fixed-window/unrecorded-gap, print the white/black tally checksum",
     )
     ingest_marks_parser.add_argument(
-        "--marks-csv", required=True, help="CSV with timestamp (ISO 8601 + UTC offset), category, sequence columns"
+        "--marks-csv", default=None, help="CSV with timestamp (ISO 8601 + UTC offset), category, sequence columns"
+    )
+    ingest_marks_parser.add_argument(
+        "--tally-csv",
+        action="append",
+        default=None,
+        metavar="CATEGORY=PATH",
+        help="A Tallies app per-counter CSV export, e.g. white_goal='.../white goal.csv'. Repeat once per "
+        "counter (Tallies exports one file per counter). Alternative to --marks-csv",
     )
     ingest_marks_parser.add_argument(
         "--out", default=None, help="Optional path to also write the resolved-marks report as a CSV"
@@ -1094,6 +1207,13 @@ def main() -> None:
         "--final-score",
         default=None,
         help="Known final score e.g. '6-4' (white-black), printed alongside the watch tally as a free correctness checksum",
+    )
+    ingest_marks_parser.add_argument(
+        "--clock-offset-seconds",
+        type=float,
+        default=0.0,
+        help="Seconds to add to every mark to correct watch-vs-camera clock skew. Run once without it, read the "
+        "clap-sync residual off the report, then re-run with that value (never applied automatically)",
     )
 
     args = parser.parse_args()
@@ -1139,11 +1259,25 @@ def main() -> None:
     elif args.command == "label-audit":
         cmd_label_audit(cfg, args.limit)
     elif args.command == "pre-label":
-        cmd_pre_label(cfg, args.out_dir, args.lrf_cache_dir, args.fps)
+        if args.marks_csv and args.tally_csv:
+            raise SystemExit("Pass at most one of --marks-csv or --tally-csv")
+        cmd_pre_label(
+            cfg,
+            args.out_dir,
+            args.lrf_cache_dir,
+            args.fps,
+            args.marks_csv,
+            args.tally_csv,
+            args.clock_offset_seconds,
+        )
     elif args.command == "name-candidates":
         cmd_name_candidates(cfg, args.candidates_dir, args.revert)
     elif args.command == "ingest-marks":
-        cmd_ingest_marks(cfg, args.marks_csv, args.out, args.final_score)
+        if bool(args.marks_csv) == bool(args.tally_csv):
+            raise SystemExit("Pass exactly one of --marks-csv or --tally-csv")
+        cmd_ingest_marks(
+            cfg, args.marks_csv, args.tally_csv, args.out, args.final_score, args.clock_offset_seconds
+        )
 
 
 if __name__ == "__main__":

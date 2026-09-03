@@ -97,6 +97,19 @@ day burned into the video -> posted to a Telegram group with the Farsi caption.
   clips, F1 0.364 -> 0.545. **Pro model (`gemini-pro-latest`) was a clear
   regression** (F1 as low as 0.000) -- it doesn't even perceive the same clear
   goals flash does. Don't switch to pro without new evidence.
+- **Live tagging (watch marks) is part of the weekly flow as of 2026-09-06.**
+  Kaveh wears a Pixel Watch running **Tallies** with three counters --
+  `white goal`, `black goal`, `moment` -- and taps during the game, because
+  audio detection provably misses real goals in a small no-crowd recreational
+  game. **Every game now needs its three tally CSV exports collected into
+  `<date>\Raw\` -- ask for them, see processing.md Step 0b.** They cannot be
+  recovered after the fact. The marks union with audio candidates (never
+  replace them) and produce the `source` column that finally makes recall
+  measurable. Settled and not worth re-litigating: phone-side capture
+  (Tasker/MacroDroid/BT clicker) is ruled out (no offline queue -- marks get
+  lost or wrongly timestamped), the camera position is per-game config rather
+  than a watch button, and there is no dedicated sync button (the clap +
+  `moment` tap IS the sync).
 - **Recall-first.** Throughout audio tuning and vision work, the standing priority
   is "don't miss real events" over "don't bombard with false positives." A change
   that only cuts precision at the cost of recall is not obviously a net win.
