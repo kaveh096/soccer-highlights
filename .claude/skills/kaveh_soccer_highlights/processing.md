@@ -360,12 +360,13 @@ convention for "files copied", not failure) -- don't read that as an error.
 **On a watch-tagged game, `pre-label` also prints the score it derived from
 the marks and fills in four `score_*` columns.** Two things to do with that:
 
-- **Check the printed score against the real final score before exporting
-  anything.** One missed tap silently shifts every later clip's counter, and
-  a wrong score posted to the group can't be quietly retracted. If it
-  disagrees, fix the `score_white`/`score_black` columns by hand (that is
-  exactly why they live in the sheet) or blank them to skip the counter for
-  that game.
+- **Glance at the printed score against the real final score before
+  exporting.** One missed tap silently shifts every later clip's counter. This
+  is a cheap sanity check, not a blocker -- Kaveh doesn't have to remember the
+  final score himself, since a dozen other players will confirm it over
+  Telegram in seconds. If it disagrees, fix the `score_white`/`score_black`
+  columns by hand (that is exactly why they live in the sheet) or blank them
+  to skip the counter for that game.
 - **Goal clips get longer.** A clip whose tap landed after the audio peak is
   stretched to cover it (capped at `marks.score_flip_cap_seconds`, 10s past
   the peak), so a 14s goal clip becomes up to ~21s -- which puts it over the

@@ -35,8 +35,9 @@ Raw multi-hour DJI recording -> audio peak detection finds candidate moments ->
 Gemini watches each candidate and scores it 1-5 for highlight-worthiness (+ writes
 an English description and a Farsi caption) -> Kaveh scans the whole ranked sheet
 himself and picks the real favorites (score is for *sorting*, not an automatic
-cutoff) -> the picks get re-encoded at share quality, with the wall-clock time of
-day burned into the video -> posted to a Telegram group with the Farsi caption.
+cutoff) -> the picks get re-encoded at share quality, with a scoreboard burned into
+the video (running score + time of day, or just the time on a game with no watch
+marks) -> posted to a Telegram group with the Farsi caption.
 
 ## Where the deep history lives (don't duplicate it here)
 
@@ -80,9 +81,27 @@ day burned into the video -> posted to a Telegram group with the Farsi caption.
   whether or not audio found a peak, and doubles as feedback on tap speed. Two
   consequences: peak-anchored goal clips are stretched to cover their own tap
   (capped 10s past the peak, `marks.score_flip_cap_seconds`) and so routinely
-  exceed the ~15s single-run export limit, and the derived score MUST be checked
-  against the real final score before exporting -- one missed tap shifts every
-  later clip's counter, and a wrong score can't be retracted from the group.
+  exceed the ~15s single-run export limit, and the derived score is worth a
+  glance before exporting, since one missed tap shifts every later clip's
+  counter. That check is cheap rather than a gate: Kaveh doesn't need to
+  remember the final score himself -- a dozen other players will answer over
+  Telegram in seconds.
+  - **This is the decision most likely to be revisited after 2026-09-06.**
+    Kaveh is explicitly open to pivoting the flip to the audio peak if real
+    tap timestamps turn out to stretch clips consistently. That pivot is a
+    config/policy change in `marks.score_for_interval`, not a rewrite -- so
+    gather the evidence (how many clips got extended, by how much) before
+    proposing it.
+- **The scoreboard is a Pillow-drawn PNG composited by ffmpeg, plus drawtext
+  for the parts that change** (`soccer_highlights/scoreboard.py`, design signed
+  off 2026-09-05). Chrome (panel, team pills, gold rule) is static and cached;
+  the score and clock are `drawtext` on top, since the score flips mid-clip and
+  the clock ticks per frame. Two traps live in that split: the score text draws
+  **digits only** (the names are already in the PNG's pills), and the panel is
+  **measured from the configured clock format** (sizing it for a stand-in string
+  runs the clock off the end). Both bit during implementation and both now have
+  tests. A game with no marks gets no board at all -- the clock falls back to
+  its old standalone box, so audio-only games look exactly as they did.
 - **Time-of-day burn-in happens in the final share encode (processing.md Step
   4), never as a separate pass and never at posting time.** `export-picks` /
   `export` / `seg_render.py` all bake the clock in while re-encoding the pick,
