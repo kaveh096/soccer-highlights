@@ -482,12 +482,28 @@ e.g. `Aug 30 07.46.36 AM`), added 2026-08-31. It's on by default; pass
   it doesn't change the CRF-vs-50MB calculus below. (Full export runs on this
   laptop vary ±30% run to run from Drive I/O, so don't try to read the
   overlay's cost out of an end-to-end export timing.)
-**A running goal counter is burned in under the clock** (`White 3 - 2 Black`),
-added 2026-09-05, on any game that has watch marks. It reads the `score_*`
-columns straight from the sheet -- so it is only as right as those columns,
-and Step 1's score check is what stands between a wrong tally and a wrong
-score posted to the group. No marks means blank columns means no counter, so
-an audio-only game is completely unaffected.
+**A scoreboard is burned in** on any game that has watch marks (design signed
+off 2026-09-05): a dark bar top-left with a WHITE pill, the score, a BLACK
+pill, and the clock past a gold rule. It reads the `score_*` columns straight
+from the sheet -- so it is only as right as those columns, and Step 1's score
+check is what stands between a wrong tally and a wrong score in the group.
+
+- **No marks means no scoreboard.** With blank score columns the clock falls
+  back to the plain box it has always been drawn in, so an audio-only game
+  looks exactly as it did before. A scoreboard with empty pills and no
+  numbers would be worse than none.
+- **How it is built** (`soccer_highlights/scoreboard.py`): the chrome --
+  panel, pills, gold rule -- is drawn once with Pillow and composited by
+  ffmpeg `overlay`; the score and clock stay `drawtext` on top, because both
+  change (the score flips, the clock ticks). Geometry is authored for a
+  2560px frame and scaled by the actual output width. The chrome PNG is
+  cached in the temp dir, keyed by everything that affects its pixels.
+- **The board is ~37% of frame width.** If that ever needs trimming, the
+  clock is the cheapest thing to pull back out of the bar.
+- Inside the board the clock is time-only (`scoreboard_time_format`); the
+  standalone fallback clock keeps its date. The panel is measured from the
+  configured format, so changing the format resizes the panel to match --
+  don't hardcode a width.
 
 - **The score flips at the TAP, not at the goal.** Deliberate: a broadcast
   score graphic also updates a beat late, it behaves identically whether or
@@ -500,7 +516,10 @@ an audio-only game is completely unaffected.
   per segment/per chunk-piece; if you ever see the score change in the wrong
   place, that arithmetic is the first suspect.
 - Tunables live in `ExportConfig` (`burn_in_time`, `burn_in_time_format`,
-  `burn_in_font_path`, `burn_in_font_size`, `burn_in_margin_px`). Two hard
+  `burn_in_font_path`, `burn_in_font_size`, `burn_in_margin_px`; plus
+  `burn_in_score`, `scoreboard_scale`, `scoreboard_time_format`,
+  `score_home_label`/`score_away_label`, and the bold/narrow font paths the
+  board draws with). Two hard
   constraints, both verified against ffmpeg 8.1.2 and both documented in the
   code: the time format **must not contain a `:`** (drawtext's
   `%{pts:gmtime:...}` splits its own arguments on colons and dies with

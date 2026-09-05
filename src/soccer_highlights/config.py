@@ -211,6 +211,26 @@ class ExportConfig:
     burn_in_score: bool = True
     score_home_label: str = "White"
     score_away_label: str = "Black"
+    # Scoreboard "bug" (design signed off 2026-09-05, see soccer_highlights.
+    # scoreboard): a dark panel with a team pill either side of the score and
+    # the clock on a gold-divided tail. Geometry is expressed for a 2560px
+    # frame and scaled by the actual output width; this multiplier is on top
+    # of that, for taste rather than for resolution.
+    scoreboard_scale: float = 1.15
+    # Time only inside the scoreboard, no date: that is what the approved
+    # design shows, and the date is redundant next to a score for a clip
+    # everyone knows the date of. It also costs real width -- carrying
+    # "Sep 06 " would push the board from 37% to ~43% of frame width. The
+    # standalone clock (a game with no marks) keeps burn_in_time_format's
+    # date, since that one can be seen with no other context.
+    # Same no-colon rule applies -- see burn_in_time_format.
+    scoreboard_time_format: str = "%I.%M.%S %p"
+    # Bold for the score, condensed bold for the team pills. Both are given as
+    # explicit file paths for the same reason burn_in_font_path is: fontconfig
+    # has no config file on this box and resolving a family name segfaults
+    # ffmpeg. Pillow needs real paths regardless.
+    burn_in_font_path_bold: str = "C:/Windows/Fonts/arialbd.ttf"
+    scoreboard_font_narrow: str = "C:/Windows/Fonts/ARIALNB.TTF"
 
 
 @dataclass

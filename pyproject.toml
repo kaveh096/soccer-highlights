@@ -12,6 +12,10 @@ dependencies = [
     "scipy",
     "pyyaml",
     "matplotlib",
+    # Draws the scoreboard chrome PNG that ffmpeg composites onto exports
+    # (soccer_highlights.scoreboard). Previously present only transitively via
+    # matplotlib -- declared now that it is imported directly.
+    "pillow",
     "anthropic",
     "python-dotenv",
     "tzdata",

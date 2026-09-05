@@ -9,6 +9,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from soccer_highlights import scoreboard
 from soccer_highlights.clipping import concat_clips
 from soccer_highlights.config import ExportConfig, ReviewConfig
 from soccer_highlights.discovery import Chunk, slice_start_epoch
@@ -36,8 +37,24 @@ def _escape_filter_value(value: str) -> str:
     return "'" + value.replace("\\", "/").replace(":", "\\:") + "'"
 
 
+def _check_time_format(cfg: ExportConfig, fmt: str | None = None, name: str = "burn_in_time_format") -> None:
+    """drawtext's `%{pts:gmtime:...}` expansion splits its own arguments on
+    colons with a hard 3-argument cap, so a colon anywhere in the time format
+    fails the render outright. Caught here with a clear message rather than
+    surfacing as ffmpeg's cryptic complaint partway through a batch."""
+    fmt = cfg.burn_in_time_format if fmt is None else fmt
+    if ":" in fmt:
+        raise ValueError(
+            f"{name} must not contain ':' (got {fmt!r}) -- "
+            "drawtext's %{pts:gmtime:...} expansion splits its own arguments on colons with a "
+            "hard 3-argument cap, so a colon here fails the render with "
+            "'%{pts} requires at most 3 arguments'. Use '.' or '-' separators."
+        )
+
+
 def _drawtext_filter(cfg: ExportConfig, epoch_base: float) -> str:
-    """A drawtext stage burning the real time of day into every frame.
+    """A standalone clock, used when there is no scoreboard to put it in --
+    i.e. a game with no watch marks, which is exactly today's behavior.
 
     `%{pts\\:gmtime\\:EPOCH\\:FORMAT}` adds the frame's own presentation
     timestamp (which restarts at ~0 for each `-ss`-trimmed piece) to a Unix
@@ -52,13 +69,7 @@ def _drawtext_filter(cfg: ExportConfig, epoch_base: float) -> str:
     this ffmpeg build has fontconfig compiled in but no fontconfig config file
     on Windows, so resolving a family name SEGFAULTS the whole process
     (reproduced 2026-08-31 with `font=Arial`)."""
-    if ":" in cfg.burn_in_time_format:
-        raise ValueError(
-            f"burn_in_time_format must not contain ':' (got {cfg.burn_in_time_format!r}) -- "
-            "drawtext's %{pts:gmtime:...} expansion splits its own arguments on colons with a "
-            "hard 3-argument cap, so a colon here fails the render with "
-            "'%{pts} requires at most 3 arguments'. Use '.' or '-' separators."
-        )
+    _check_time_format(cfg)
     text = f"%{{pts\\:gmtime\\:{epoch_base:.3f}\\:{cfg.burn_in_time_format}}}"
     return (
         f"drawtext=fontfile={_escape_filter_value(cfg.burn_in_font_path)}"
@@ -104,36 +115,62 @@ class ScoreOverlay:
             flip_team=(row.get("score_flip_team") or "").strip(),
         )
 
-    def text_before(self, cfg: ExportConfig) -> str:
-        return f"{cfg.score_home_label} {self.white} - {self.black} {cfg.score_away_label}"
+    # Digits only: the team names live in the scoreboard PNG's pills, so
+    # drawing them again here would print the labels on top of themselves.
+    @property
+    def digits_before(self) -> str:
+        return f"{self.white} - {self.black}"
 
-    def text_after(self, cfg: ExportConfig) -> str:
+    @property
+    def digits_after(self) -> str:
         white = self.white + (1 if self.flip_team == "white" else 0)
         black = self.black + (1 if self.flip_team == "black" else 0)
-        return f"{cfg.score_home_label} {white} - {black} {cfg.score_away_label}"
+        return f"{white} - {black}"
 
 
-def _drawtext_score_stage(cfg: ExportConfig, text: str, enable: str | None = None) -> str:
-    """One static-text drawtext stage for the score, sitting under the clock.
+def _drawtext_score_stage(cfg: ExportConfig, text: str, layout, enable: str | None = None) -> str:
+    """One drawtext stage for the score, centred in the scoreboard's reserved
+    slot.
+
+    Centring is done with drawtext's own `text_w` variable rather than by
+    measuring the string in Python, so a two-digit score grows symmetrically
+    about the slot's centre instead of drifting into the BLACK pill.
 
     Unlike the clock this draws a fixed string, so none of the
     `%{pts:gmtime:...}` argument-parsing restrictions apply -- but ':' is
     still a filter-option separator, which is why the score is rendered with
     a ' - ' separator and never a colon."""
-    y = cfg.burn_in_margin_px * 2 + cfg.burn_in_font_size
     stage = (
-        f"drawtext=fontfile={_escape_filter_value(cfg.burn_in_font_path)}"
+        f"drawtext=fontfile={_escape_filter_value(cfg.burn_in_font_path_bold)}"
         f":text={_escape_filter_value(text)}"
-        f":x={cfg.burn_in_margin_px}:y={y}"
-        f":fontsize={cfg.burn_in_font_size}:fontcolor=white"
-        f":box=1:boxcolor=black@0.5:boxborderw={cfg.burn_in_margin_px // 3}"
+        f":x={layout.score_center_abs}-text_w/2"
+        f":y={layout.center_y_abs}-text_h/2"
+        f":fontsize={layout.font_score}:fontcolor={scoreboard.SCORE_COLOR}"
     )
     if enable is not None:
         stage += f":enable={_escape_filter_value(enable)}"
     return stage
 
 
-def _score_filters(cfg: ExportConfig, score: ScoreOverlay, piece_start: float, piece_duration: float) -> list[str]:
+def _drawtext_clock_stage(cfg: ExportConfig, epoch_base: float, layout) -> str:
+    """The clock, sitting in the scoreboard's tail past the gold rule.
+
+    Uses `scoreboard_time_format` (time only) rather than the standalone
+    clock's dated format -- see that config field for why."""
+    _check_time_format(cfg, cfg.scoreboard_time_format, "scoreboard_time_format")
+    text = f"%{{pts\\:gmtime\\:{epoch_base:.3f}\\:{cfg.scoreboard_time_format}}}"
+    return (
+        f"drawtext=fontfile={_escape_filter_value(cfg.burn_in_font_path)}"
+        f":text='{text}'"
+        f":x={layout.clock_x_abs}"
+        f":y={layout.center_y_abs}-text_h/2"
+        f":fontsize={layout.font_clock}:fontcolor={scoreboard.CLOCK_COLOR}"
+    )
+
+
+def _score_filters(
+    cfg: ExportConfig, score: ScoreOverlay, piece_start: float, piece_duration: float, layout
+) -> list[str]:
     """Score stages for ONE encoded piece, with the flip rebased onto that
     piece's own timeline (every `-ss`-trimmed piece restarts t at 0).
 
@@ -143,16 +180,16 @@ def _score_filters(cfg: ExportConfig, score: ScoreOverlay, piece_start: float, p
     flip. Getting this wrong puts the score change in the wrong segment,
     which is the same trap the time-of-day clock hit."""
     if score.flip_seconds is None or not score.flip_team:
-        return [_drawtext_score_stage(cfg, score.text_before(cfg))]
+        return [_drawtext_score_stage(cfg, score.digits_before, layout)]
 
     local_flip = score.flip_seconds - piece_start
     if local_flip <= 0:
-        return [_drawtext_score_stage(cfg, score.text_after(cfg))]
+        return [_drawtext_score_stage(cfg, score.digits_after, layout)]
     if local_flip >= piece_duration:
-        return [_drawtext_score_stage(cfg, score.text_before(cfg))]
+        return [_drawtext_score_stage(cfg, score.digits_before, layout)]
     return [
-        _drawtext_score_stage(cfg, score.text_before(cfg), enable=f"lt(t,{local_flip:.3f})"),
-        _drawtext_score_stage(cfg, score.text_after(cfg), enable=f"gte(t,{local_flip:.3f})"),
+        _drawtext_score_stage(cfg, score.digits_before, layout, enable=f"lt(t,{local_flip:.3f})"),
+        _drawtext_score_stage(cfg, score.digits_after, layout, enable=f"gte(t,{local_flip:.3f})"),
     ]
 
 
@@ -199,22 +236,60 @@ def _encode_piece(
     `piece_start` is this piece's offset into the WHOLE clip, needed to
     rebase the score flip onto this piece's own timeline. It is 0.0 for a
     single-piece clip, and the accumulated offset for a chunk-spanning or
-    segmented one."""
+    segmented one.
+
+    Two overlay shapes, and which one applies is decided by whether there IS
+    a score: with one, the full scoreboard is composited and the clock lives
+    inside it; without one (a game recorded with no watch marks) the clock
+    falls back to the standalone box it has always been drawn in. That
+    fallback is what keeps an audio-only game looking exactly as it does
+    today -- a scoreboard with empty team pills and no numbers would be
+    worse than no scoreboard."""
     audio_args = ["-ac", "1"] if cfg.mono_audio else []
-    video_filter = f"{_scale_filter(cfg.max_width)},fps={cfg.fps}"
+    base_filter = f"{_scale_filter(cfg.max_width)},fps={cfg.fps}"
+    encode_args = [
+        "-c:v", "libx264", "-preset", cfg.preset, "-crf", str(cfg.crf), "-threads", str(cfg.threads),
+        "-c:a", "aac", "-strict", "-2", "-b:a", f"{cfg.audio_bitrate_kbps}k", *audio_args,
+    ]
+    use_board = score is not None and isinstance(cfg, ExportConfig) and cfg.burn_in_score
+
+    if use_board:
+        chrome_path, layout = scoreboard.chrome_png(cfg, cfg.max_width)
+        stages = list(_score_filters(cfg, score, piece_start, duration, layout))
+        if epoch_base is not None and cfg.burn_in_time:
+            stages.append(_drawtext_clock_stage(cfg, epoch_base, layout))
+        # The chrome is a second input, so this needs filter_complex rather
+        # than -vf -- which also means the audio has to be mapped explicitly,
+        # since -vf's implicit stream selection no longer applies.
+        filter_complex = (
+            f"[0:v]{base_filter}[v];"
+            f"[v][1:v]overlay=x={layout.inset}:y={layout.inset}[bg];"
+            f"[bg]{','.join(stages)}[vout]"
+        )
+        _run_ffmpeg(
+            [
+                "-ss", f"{start:.3f}",
+                "-i", str(source_path),
+                "-t", f"{duration:.3f}",
+                "-i", str(chrome_path),
+                "-filter_complex", filter_complex,
+                "-map", "[vout]", "-map", "0:a?",
+                *encode_args,
+                str(out_path),
+            ]
+        )
+        return
+
+    video_filter = base_filter
     if epoch_base is not None and isinstance(cfg, ExportConfig) and cfg.burn_in_time:
         video_filter += f",{_drawtext_filter(cfg, epoch_base)}"
-    if score is not None and isinstance(cfg, ExportConfig) and cfg.burn_in_score:
-        for stage in _score_filters(cfg, score, piece_start, duration):
-            video_filter += f",{stage}"
     _run_ffmpeg(
         [
             "-ss", f"{start:.3f}",
             "-i", str(source_path),
             "-t", f"{duration:.3f}",
             "-vf", video_filter,
-            "-c:v", "libx264", "-preset", cfg.preset, "-crf", str(cfg.crf), "-threads", str(cfg.threads),
-            "-c:a", "aac", "-strict", "-2", "-b:a", f"{cfg.audio_bitrate_kbps}k", *audio_args,
+            *encode_args,
             str(out_path),
         ]
     )
