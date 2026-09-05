@@ -98,6 +98,9 @@ def main() -> None:
     chunks = discover_chunks(args.source_dir)
     interval = Interval(start_seconds=float(row["start_seconds"]), end_seconds=float(row["end_seconds"]))
     slices = map_interval_to_chunks(interval, chunks)
+    # Same sheet columns export-picks reads, so a clip rendered here gets the
+    # identical score overlay it would have got from a single-shot export.
+    score = render.ScoreOverlay.from_sheet_row(row)
 
     # Flatten the per-chunk slices into sub-segments short enough to finish
     # inside one invocation. Chunk boundaries are honoured first so a segment
@@ -108,14 +111,22 @@ def main() -> None:
     # segments -- without this, every segment would restart the clock at the
     # clip's own start time, and long clips (the only ones that come through
     # here) would read wrong.
-    segments: list[tuple[Path, float, float, float]] = []
+    # `clip_pos` is the running offset into the WHOLE clip (across chunk
+    # boundaries and segment splits alike), which is what the score flip is
+    # measured against -- every -ss-trimmed segment restarts its own t at 0,
+    # so without this the score would change in the wrong segment. Goal
+    # clips are stretched to cover their tap and routinely land over the
+    # ~15s single-run limit, so this script is the NORMAL path for them.
+    segments: list[tuple[Path, float, float, float, float]] = []
+    clip_pos = 0.0
     for cs in slices:
         remaining = cs.local_end_seconds - cs.local_start_seconds
         pos = cs.local_start_seconds
         while remaining > 1e-6:
             take = min(args.seg_seconds, remaining)
-            segments.append((cs.chunk.mp4_path, pos, take, slice_start_epoch(cs.chunk, pos)))
+            segments.append((cs.chunk.mp4_path, pos, take, slice_start_epoch(cs.chunk, pos), clip_pos))
             pos += take
+            clip_pos += take
             remaining -= take
 
     seg_dir = out_dir / f".segs_{final_path.stem}"
@@ -123,14 +134,14 @@ def main() -> None:
     seg_paths = [seg_dir / f"seg{i:02d}.mp4" for i in range(len(segments))]
 
     rendered = 0
-    for i, ((src, start, dur, epoch_base), seg_path) in enumerate(zip(segments, seg_paths)):
+    for i, ((src, start, dur, epoch_base, clip_offset), seg_path) in enumerate(zip(segments, seg_paths)):
         if render.is_playable(seg_path):
             continue
         if rendered >= args.max_segments:
             break
         seg_path.unlink(missing_ok=True)  # drop a truncated leftover from a killed run
         print(f"Rendering seg {i + 1}/{len(segments)} of {args.clip}: {dur:.2f}s @ crf{args.crf}", flush=True)
-        render._encode_piece(src, start, dur, seg_path, cfg.export, epoch_base)
+        render._encode_piece(src, start, dur, seg_path, cfg.export, epoch_base, score, clip_offset)
         if not render.is_playable(seg_path):
             raise SystemExit(f"segment {i} came out unplayable -- rerun to retry it")
         rendered += 1

@@ -247,6 +247,69 @@ def resolve_marks(
     return resolved
 
 
+def union_with_audio_detailed(
+    audio_intervals: list[Interval], resolved: list[ResolvedMark]
+) -> list[tuple[Interval, str, ResolvedMark | None]]:
+    """`union_with_audio`, but also reporting WHICH mark each interval came
+    from (None for an audio candidate no mark touched).
+
+    The association is what the score-counter overlay needs: a `both` row's
+    clip has to be extended to cover its own tap, and only the owning mark
+    knows where that tap is. Kept as the single implementation, with
+    `union_with_audio` as a thin wrapper over it, so the peak-matching rule
+    lives in exactly one place."""
+    sources = ["audio"] * len(audio_intervals)
+    owners: list[ResolvedMark | None] = [None] * len(audio_intervals)
+    extra: list[tuple[Interval, str, ResolvedMark | None]] = []
+    for r in resolved:
+        if r.anchor == "audio_peak" and r.interval is not None:
+            peak_time = r.interval.peaks[0].time_seconds
+            for i, candidate in enumerate(audio_intervals):
+                if any(p.time_seconds == peak_time for p in candidate.peaks):
+                    sources[i] = "both"
+                    owners[i] = r
+                    break
+        elif r.anchor == "fixed_window" and r.interval is not None:
+            extra.append((r.interval, "mark", r))
+
+    combined = list(zip(audio_intervals, sources, owners)) + extra
+    combined.sort(key=lambda triple: triple[0].start_seconds)
+    return combined
+
+
+def extend_for_score_flip(
+    combined: list[tuple[Interval, str, ResolvedMark | None]], marks_cfg: MarksConfig
+) -> int:
+    """Extend peak-anchored clips so the tap that scores them falls INSIDE
+    the clip, giving the burned-in score somewhere to visibly flip.
+
+    This is the one place marks MODIFY an audio interval rather than just
+    annotating it. It stays inside the recall-first rule -- an interval is
+    only ever extended, never shortened or dropped -- but it does mean a
+    `both` clip is longer than audio detection alone would have made it.
+
+    Only `both` rows need this. A `fixed_window` clip already ends
+    `goal_lookahead_seconds` after its own tap by construction, so the tap
+    is always inside it.
+
+    The cap matters: without one, a forgotten press minutes later would
+    stretch a 14s highlight into a several-minute clip. Past the cap the
+    clip is left alone and `score_for_interval` falls back to flipping at
+    the clip's midpoint instead. Returns how many intervals were extended."""
+    extended = 0
+    for interval, source, owner in combined:
+        if source != "both" or owner is None or owner.global_seconds is None or not interval.peaks:
+            continue
+        peak_time = owner.interval.peaks[0].time_seconds if owner.interval and owner.interval.peaks else None
+        if peak_time is None or owner.global_seconds > peak_time + marks_cfg.score_flip_cap_seconds:
+            continue
+        new_end = owner.global_seconds + marks_cfg.score_flip_tail_seconds
+        if new_end > interval.end_seconds:
+            interval.end_seconds = new_end
+            extended += 1
+    return extended
+
+
 def union_with_audio(
     audio_intervals: list[Interval], resolved: list[ResolvedMark]
 ) -> tuple[list[Interval], list[str]]:
@@ -269,21 +332,83 @@ def union_with_audio(
 
     Marks that landed in an unrecorded gap contribute nothing; they can't
     be rendered and are reported separately."""
-    sources = ["audio"] * len(audio_intervals)
-    extra: list[Interval] = []
-    for r in resolved:
-        if r.anchor == "audio_peak" and r.interval is not None:
-            peak_time = r.interval.peaks[0].time_seconds
-            for i, candidate in enumerate(audio_intervals):
-                if any(p.time_seconds == peak_time for p in candidate.peaks):
-                    sources[i] = "both"
-                    break
-        elif r.anchor == "fixed_window" and r.interval is not None:
-            extra.append(r.interval)
+    combined = union_with_audio_detailed(audio_intervals, resolved)
+    return [iv for iv, _, _ in combined], [src for _, src, _ in combined]
 
-    combined = list(zip(audio_intervals, sources)) + [(iv, "mark") for iv in extra]
-    combined.sort(key=lambda pair: pair[0].start_seconds)
-    return [iv for iv, _ in combined], [src for _, src in combined]
+
+@dataclass
+class ScoreColumns:
+    """The running score as it should appear on one clip. Written into the
+    review sheet so it can be eyeballed -- and corrected by hand -- before
+    any 37x-realtime render, rather than being re-derived at export time."""
+
+    white: int  # score at the clip's START, before any goal inside it
+    black: int
+    flip_seconds: float | None  # offset INTO the clip where the score changes
+    flip_team: str  # "white" / "black", or "" when there is no flip
+
+
+_GOAL_CATEGORIES = {"white_goal": "white", "black_goal": "black"}
+
+
+def score_events(resolved: list[ResolvedMark]) -> list[tuple[float, str]]:
+    """Goal taps as (global_seconds, "white"|"black"), in time order.
+
+    The TAP time is the score's timeline position, deliberately -- not the
+    audio peak. A real broadcast's score graphic also updates a beat after
+    the ball goes in, and using the tap makes the behavior identical whether
+    or not audio happened to find a peak (Kaveh's call, 2026-09-05). It also
+    means the overlay doubles as feedback on how fast he tapped.
+
+    `moment` marks never score. Marks that fell in an unrecorded gap are
+    skipped -- there is no timeline position to place them at. Undos are
+    expected to have been resolved already (`resolve_undos` /
+    `load_tallies_csv`), so a cancelled goal never reaches here."""
+    events = [
+        (r.global_seconds, _GOAL_CATEGORIES[r.mark.category])
+        for r in resolved
+        if r.mark.category in _GOAL_CATEGORIES and r.global_seconds is not None
+    ]
+    events.sort(key=lambda e: e[0])
+    return events
+
+
+def score_for_interval(
+    interval: Interval, events: list[tuple[float, str]], owner: ResolvedMark | None = None
+) -> ScoreColumns:
+    """Running score for one clip, plus where (if anywhere) it flips.
+
+    ALL of the placement policy lives here rather than in the renderer, so
+    that every decision is visible as a plain number in the review sheet and
+    can be hand-corrected before export.
+
+    `owner` is the mark this clip came from, if any (see
+    `union_with_audio_detailed`). It exists for one case: a goal whose tap
+    landed OUTSIDE its own clip, because the press was slow enough that
+    `extend_for_score_flip` would have blown its cap covering it. That clip
+    still shows a goal, so the score still has to move -- it just has no
+    trustworthy instant to move at. The flip then goes at the clip's
+    MIDPOINT: deterministic, and dependent on neither audio nor press
+    timing, which are precisely the two things that failed in that case."""
+    white = sum(1 for t, team in events if t < interval.start_seconds and team == "white")
+    black = sum(1 for t, team in events if t < interval.start_seconds and team == "black")
+
+    inside = [(t, team) for t, team in events if interval.start_seconds <= t <= interval.end_seconds]
+    if len(inside) > 1:
+        print(
+            f"WARNING: {len(inside)} goal taps inside one clip "
+            f"({interval.start_seconds:.1f}-{interval.end_seconds:.1f}s) -- only the first is drawn"
+        )
+    if inside:
+        tap_time, team = inside[0]
+        return ScoreColumns(white=white, black=black, flip_seconds=tap_time - interval.start_seconds, flip_team=team)
+
+    if owner is not None and owner.mark.category in _GOAL_CATEGORIES and owner.global_seconds is not None:
+        midpoint = (interval.end_seconds - interval.start_seconds) / 2
+        return ScoreColumns(
+            white=white, black=black, flip_seconds=midpoint, flip_team=_GOAL_CATEGORIES[owner.mark.category]
+        )
+    return ScoreColumns(white=white, black=black, flip_seconds=None, flip_team="")
 
 
 @dataclass

@@ -74,6 +74,15 @@ day burned into the video -> posted to a Telegram group with the Farsi caption.
   workflow is scanning the whole ranked sheet, not trusting `score>=4` as a hard
   cutoff. Don't design features around a hard threshold without checking this is
   still true.
+- **The burned-in goal counter flips at the TAP, not at the goal or the audio
+  peak** (Kaveh's explicit call, 2026-09-05 -- don't "fix" it to the peak). A
+  broadcast score graphic also lags the goal; tap-anchoring behaves identically
+  whether or not audio found a peak, and doubles as feedback on tap speed. Two
+  consequences: peak-anchored goal clips are stretched to cover their own tap
+  (capped 10s past the peak, `marks.score_flip_cap_seconds`) and so routinely
+  exceed the ~15s single-run export limit, and the derived score MUST be checked
+  against the real final score before exporting -- one missed tap shifts every
+  later clip's counter, and a wrong score can't be retracted from the group.
 - **Time-of-day burn-in happens in the final share encode (processing.md Step
   4), never as a separate pass and never at posting time.** `export-picks` /
   `export` / `seg_render.py` all bake the clock in while re-encoding the pick,

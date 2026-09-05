@@ -202,6 +202,15 @@ class ExportConfig:
     burn_in_font_path: str = "C:/Windows/Fonts/arial.ttf"
     burn_in_font_size: int = 42
     burn_in_margin_px: int = 24
+    # Running goal counter (2026-09-05), drawn under the clock. Needs
+    # watch-mark data: with no marks the review sheet's score columns are
+    # blank and no counter is drawn, so an audio-only game is unaffected.
+    # Team labels are the shirt colours the game is actually played in.
+    # A literal ':' would need escaping in the filter string, so the score
+    # separator is ' - ' -- same reason the clock uses dots.
+    burn_in_score: bool = True
+    score_home_label: str = "White"
+    score_away_label: str = "Black"
 
 
 @dataclass
@@ -323,6 +332,21 @@ class MarksConfig:
     # what would actually measure it. Treat these as provisional.
     snap_lookback_seconds: float = 15.0
     snap_lookahead_seconds: float = 2.0
+    # Score-counter burn-in (2026-09-05): the burned-in score flips at the
+    # TAP, not at the audio peak -- a broadcast score graphic also updates a
+    # beat after the goal, and anchoring on the tap behaves identically
+    # whether or not audio found a peak. But a peak-anchored clip ends only
+    # timeline.post_peak_seconds (5s) after the peak, while the tap lands
+    # later than that, so the clip has to be stretched to give the flip
+    # somewhere to happen. This caps that stretch, measured from the PEAK:
+    # past it the clip is left alone and the flip falls back to the clip
+    # midpoint (marks.score_for_interval). 10s is Kaveh's own estimate of
+    # his worst realistic press delay -- provisional until a real game
+    # measures it, like the snap windows above.
+    score_flip_cap_seconds: float = 10.0
+    # A tail after the tap so the updated score is readable instead of
+    # flashing for a few frames before the cut.
+    score_flip_tail_seconds: float = 2.0
     # Clap-sync search half-width (see marks.measure_clock_offset). Kaveh
     # synced the camera RTC to his phone via DJI Mimo on 2026-09-02 and
     # reports it agrees within ~1s, and the watch takes its clock from the

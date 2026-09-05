@@ -357,6 +357,21 @@ a same-day game, not just when you actually see the `STATUS_IN_PAGE_ERROR`
 symptom. `robocopy` exits with code 1 on a normal successful copy (its
 convention for "files copied", not failure) -- don't read that as an error.
 
+**On a watch-tagged game, `pre-label` also prints the score it derived from
+the marks and fills in four `score_*` columns.** Two things to do with that:
+
+- **Check the printed score against the real final score before exporting
+  anything.** One missed tap silently shifts every later clip's counter, and
+  a wrong score posted to the group can't be quietly retracted. If it
+  disagrees, fix the `score_white`/`score_black` columns by hand (that is
+  exactly why they live in the sheet) or blank them to skip the counter for
+  that game.
+- **Goal clips get longer.** A clip whose tap landed after the audio peak is
+  stretched to cover it (capped at `marks.score_flip_cap_seconds`, 10s past
+  the peak), so a 14s goal clip becomes up to ~21s -- which puts it over the
+  ~15s single-run export limit. Expect `seg_render.py` to be the normal path
+  for goal clips now, not the exception.
+
 ### Step 1b -- rename candidates into review order (`name-candidates`)
 
 Run this **only once `pre-label` has fully finished** (every row scored -- the
@@ -467,6 +482,23 @@ e.g. `Aug 30 07.46.36 AM`), added 2026-08-31. It's on by default; pass
   it doesn't change the CRF-vs-50MB calculus below. (Full export runs on this
   laptop vary ±30% run to run from Drive I/O, so don't try to read the
   overlay's cost out of an end-to-end export timing.)
+**A running goal counter is burned in under the clock** (`White 3 - 2 Black`),
+added 2026-09-05, on any game that has watch marks. It reads the `score_*`
+columns straight from the sheet -- so it is only as right as those columns,
+and Step 1's score check is what stands between a wrong tally and a wrong
+score posted to the group. No marks means blank columns means no counter, so
+an audio-only game is completely unaffected.
+
+- **The score flips at the TAP, not at the goal.** Deliberate: a broadcast
+  score graphic also updates a beat late, it behaves identically whether or
+  not audio found a peak, and it doubles as feedback on how fast the tap was.
+- If a press was too slow to cover within the cap, the flip falls back to the
+  clip's midpoint -- deterministic, and dependent on neither audio nor press
+  timing, which are the two things that failed in that case.
+- Both `export-picks` and `seg_render.py` read the same columns, so a long
+  clip rendered in segments gets the identical overlay. The flip is rebased
+  per segment/per chunk-piece; if you ever see the score change in the wrong
+  place, that arithmetic is the first suspect.
 - Tunables live in `ExportConfig` (`burn_in_time`, `burn_in_time_format`,
   `burn_in_font_path`, `burn_in_font_size`, `burn_in_margin_px`). Two hard
   constraints, both verified against ffmpeg 8.1.2 and both documented in the

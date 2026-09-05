@@ -8,13 +8,17 @@ from soccer_highlights.discovery import Chunk
 from soccer_highlights.marks import (
     RECORDING_TZ,
     Mark,
+    extend_for_score_flip,
     load_marks_csv,
     load_tallies_csv,
     measure_clock_offset,
     merge_tally_marks,
     resolve_marks,
     resolve_undos,
+    score_events,
+    score_for_interval,
     union_with_audio,
+    union_with_audio_detailed,
 )
 from soccer_highlights.timeline import GlobalPeak, Interval
 
@@ -349,3 +353,136 @@ def test_resolve_marks_reports_unrecorded_gap():
     assert resolved.anchor == "unrecorded_gap"
     assert resolved.global_seconds is None
     assert resolved.interval is None
+
+
+# --- Score counter -------------------------------------------------------
+#
+# The burned-in score flips at the TAP, not at the audio peak (Kaveh's call,
+# 2026-09-05): a broadcast graphic also lags the goal, and tap-anchoring
+# behaves the same whether or not audio found a peak.
+
+
+def _goal_mark(seq: int, h: int, mi: int, s: int, category: str = "white_goal") -> Mark:
+    return Mark(sequence=seq, timestamp=_local(2026, 8, 23, h, mi, s), category=category)
+
+
+def test_score_events_counts_only_goals_in_time_order():
+    chunks = [_chunk(1, datetime(2026, 8, 23, 8, 0, 0), duration=1000.0, global_start=0.0)]
+    marks_cfg, timeline_cfg = MarksConfig(), TimelineConfig()
+    marks = [
+        _goal_mark(1, 8, 2, 0, "black_goal"),  # global 120
+        _goal_mark(2, 8, 1, 0, "white_goal"),  # global 60, tapped later but earlier in time
+        _goal_mark(3, 8, 3, 0, "moment"),  # never scores
+    ]
+
+    resolved = resolve_marks(marks, chunks, [], marks_cfg, timeline_cfg)
+
+    assert score_events(resolved) == [(60.0, "white"), (120.0, "black")]
+
+
+def test_score_events_skips_a_mark_in_an_unrecorded_gap():
+    # No timeline position exists for it, so it cannot be placed on a clip.
+    chunks = [
+        _chunk(1, datetime(2026, 8, 23, 8, 0, 0), duration=100.0, global_start=0.0),
+        _chunk(2, datetime(2026, 8, 23, 8, 5, 0), duration=100.0, global_start=100.0),
+    ]
+    marks_cfg, timeline_cfg = MarksConfig(), TimelineConfig()
+    resolved = resolve_marks([_goal_mark(1, 8, 3, 0)], chunks, [], marks_cfg, timeline_cfg)
+
+    assert resolved[0].anchor == "unrecorded_gap"
+    assert score_events(resolved) == []
+
+
+def test_score_for_interval_reports_the_score_before_the_clip_and_flips_at_the_tap():
+    events = [(50.0, "white"), (80.0, "black"), (125.0, "white")]
+    interval = Interval(start_seconds=120.0, end_seconds=134.0)
+
+    cols = score_for_interval(interval, events)
+
+    assert (cols.white, cols.black) == (1, 1)  # the 125s goal has NOT landed yet at clip start
+    assert cols.flip_seconds == 5.0
+    assert cols.flip_team == "white"
+
+
+def test_score_for_interval_is_static_when_no_goal_falls_inside():
+    events = [(50.0, "white")]
+
+    cols = score_for_interval(Interval(start_seconds=200.0, end_seconds=214.0), events)
+
+    assert (cols.white, cols.black) == (1, 0)
+    assert cols.flip_seconds is None
+    assert cols.flip_team == ""
+
+
+def test_score_for_interval_falls_back_to_the_midpoint_when_the_tap_is_outside_its_clip():
+    """A press too slow for extend_for_score_flip to cover without blowing
+    its cap. The clip still shows a goal, so the score still has to move --
+    but neither the tap nor audio gives a trustworthy instant, so it goes to
+    a position that depends on neither."""
+    chunks = [_chunk(1, datetime(2026, 8, 23, 8, 0, 0), duration=1000.0, global_start=0.0)]
+    mark = _goal_mark(1, 8, 2, 30, "black_goal")  # global 150
+    audio_peaks = [GlobalPeak(time_seconds=140.0, score=1.0)]
+    resolved = resolve_marks([mark], chunks, audio_peaks, MarksConfig(), TimelineConfig())
+    interval = Interval(start_seconds=131.0, end_seconds=145.0)  # tap at 150 is past the end
+
+    cols = score_for_interval(interval, score_events(resolved), resolved[0])
+
+    assert cols.flip_seconds == 7.0  # midpoint of a 14s clip
+    assert cols.flip_team == "black"
+
+
+def test_extend_for_score_flip_stretches_a_clip_to_cover_its_own_tap():
+    chunks = [_chunk(1, datetime(2026, 8, 23, 8, 0, 0), duration=1000.0, global_start=0.0)]
+    # Tapped 8s after the peak audio caught -- inside the 10s cap.
+    mark = _goal_mark(1, 8, 2, 10)  # global 130
+    peak = GlobalPeak(time_seconds=122.0, score=1.0)
+    marks_cfg = MarksConfig(score_flip_cap_seconds=10.0, score_flip_tail_seconds=2.0)
+    resolved = resolve_marks([mark], chunks, [peak], marks_cfg, TimelineConfig(lookback_seconds=9.0, post_peak_seconds=5.0))
+    audio = [Interval(start_seconds=113.0, end_seconds=127.0, peaks=[peak])]
+
+    combined = union_with_audio_detailed(audio, resolved)
+    n = extend_for_score_flip(combined, marks_cfg)
+
+    assert n == 1
+    assert combined[0][1] == "both"
+    assert combined[0][0].end_seconds == 132.0  # tap 130 + 2s tail, so the flip is readable
+
+
+def test_extend_for_score_flip_respects_the_cap_on_a_slow_press():
+    """Without the cap, a press forgotten for minutes would stretch a 14s
+    highlight into a several-minute clip."""
+    chunks = [_chunk(1, datetime(2026, 8, 23, 8, 0, 0), duration=1000.0, global_start=0.0)]
+    mark = _goal_mark(1, 8, 2, 25)  # global 145, i.e. 23s after the peak
+    peak = GlobalPeak(time_seconds=122.0, score=1.0)
+    marks_cfg = MarksConfig(score_flip_cap_seconds=10.0, snap_lookback_seconds=30.0)
+    resolved = resolve_marks([mark], chunks, [peak], marks_cfg, TimelineConfig(lookback_seconds=9.0, post_peak_seconds=5.0))
+    audio = [Interval(start_seconds=113.0, end_seconds=127.0, peaks=[peak])]
+
+    combined = union_with_audio_detailed(audio, resolved)
+
+    assert extend_for_score_flip(combined, marks_cfg) == 0
+    assert combined[0][0].end_seconds == 127.0  # untouched
+
+
+def test_extend_for_score_flip_leaves_fixed_window_clips_alone():
+    """A no-peak clip already ends goal_lookahead_seconds after its own tap,
+    so the tap is inside it by construction."""
+    chunks = [_chunk(1, datetime(2026, 8, 23, 8, 0, 0), duration=1000.0, global_start=0.0)]
+    marks_cfg = MarksConfig()
+    resolved = resolve_marks([_goal_mark(1, 8, 2, 10)], chunks, [], marks_cfg, TimelineConfig())
+
+    combined = union_with_audio_detailed([], resolved)
+    end_before = combined[0][0].end_seconds
+
+    assert extend_for_score_flip(combined, marks_cfg) == 0
+    assert combined[0][0].end_seconds == end_before
+    assert combined[0][1] == "mark"
+
+
+def test_undone_goal_never_reaches_the_score():
+    marks = [_goal_mark(1, 8, 1, 0), Mark(sequence=2, timestamp=_local(2026, 8, 23, 8, 1, 5), category="undo")]
+    chunks = [_chunk(1, datetime(2026, 8, 23, 8, 0, 0), duration=1000.0, global_start=0.0)]
+
+    resolved = resolve_marks(resolve_undos(marks), chunks, [], MarksConfig(), TimelineConfig())
+
+    assert score_events(resolved) == []

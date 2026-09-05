@@ -6,6 +6,7 @@ output quality."""
 from __future__ import annotations
 
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 from soccer_highlights.clipping import concat_clips
@@ -70,6 +71,91 @@ def _drawtext_filter(cfg: ExportConfig, epoch_base: float) -> str:
     )
 
 
+@dataclass
+class ScoreOverlay:
+    """A running goal counter to burn into one clip.
+
+    `flip_seconds` is an offset into the WHOLE clip, not into whichever
+    piece is currently being encoded -- `_encode_piece` rebases it. None
+    means the score is static for the clip's whole length."""
+
+    white: int  # score at the clip's start, i.e. before `flip_team` scores
+    black: int
+    flip_seconds: float | None = None
+    flip_team: str = ""  # "white" / "black"
+
+    @classmethod
+    def from_sheet_row(cls, row: dict[str, str]) -> ScoreOverlay | None:
+        """Build from a review/post sheet row, or None if it carries no score.
+
+        Blank or absent columns are the normal case, not an error: a game
+        recorded without the watch has no marks, so `pre-label` leaves these
+        empty and no counter is drawn. Reading the score from the sheet
+        rather than re-deriving it at export time is deliberate -- it means
+        the numbers can be eyeballed, and corrected by hand, before a
+        ~37x-realtime render commits them to a file."""
+        if not row.get("score_white") or not row.get("score_black"):
+            return None
+        flip_raw = (row.get("score_flip_seconds") or "").strip()
+        return cls(
+            white=int(row["score_white"]),
+            black=int(row["score_black"]),
+            flip_seconds=float(flip_raw) if flip_raw else None,
+            flip_team=(row.get("score_flip_team") or "").strip(),
+        )
+
+    def text_before(self, cfg: ExportConfig) -> str:
+        return f"{cfg.score_home_label} {self.white} - {self.black} {cfg.score_away_label}"
+
+    def text_after(self, cfg: ExportConfig) -> str:
+        white = self.white + (1 if self.flip_team == "white" else 0)
+        black = self.black + (1 if self.flip_team == "black" else 0)
+        return f"{cfg.score_home_label} {white} - {black} {cfg.score_away_label}"
+
+
+def _drawtext_score_stage(cfg: ExportConfig, text: str, enable: str | None = None) -> str:
+    """One static-text drawtext stage for the score, sitting under the clock.
+
+    Unlike the clock this draws a fixed string, so none of the
+    `%{pts:gmtime:...}` argument-parsing restrictions apply -- but ':' is
+    still a filter-option separator, which is why the score is rendered with
+    a ' - ' separator and never a colon."""
+    y = cfg.burn_in_margin_px * 2 + cfg.burn_in_font_size
+    stage = (
+        f"drawtext=fontfile={_escape_filter_value(cfg.burn_in_font_path)}"
+        f":text={_escape_filter_value(text)}"
+        f":x={cfg.burn_in_margin_px}:y={y}"
+        f":fontsize={cfg.burn_in_font_size}:fontcolor=white"
+        f":box=1:boxcolor=black@0.5:boxborderw={cfg.burn_in_margin_px // 3}"
+    )
+    if enable is not None:
+        stage += f":enable={_escape_filter_value(enable)}"
+    return stage
+
+
+def _score_filters(cfg: ExportConfig, score: ScoreOverlay, piece_start: float, piece_duration: float) -> list[str]:
+    """Score stages for ONE encoded piece, with the flip rebased onto that
+    piece's own timeline (every `-ss`-trimmed piece restarts t at 0).
+
+    A clip can be split two different ways -- across a chunk boundary
+    (render_export_clip) and into resumable segments (seg_render.py) -- and
+    in both cases a piece can sit entirely before or entirely after the
+    flip. Getting this wrong puts the score change in the wrong segment,
+    which is the same trap the time-of-day clock hit."""
+    if score.flip_seconds is None or not score.flip_team:
+        return [_drawtext_score_stage(cfg, score.text_before(cfg))]
+
+    local_flip = score.flip_seconds - piece_start
+    if local_flip <= 0:
+        return [_drawtext_score_stage(cfg, score.text_after(cfg))]
+    if local_flip >= piece_duration:
+        return [_drawtext_score_stage(cfg, score.text_before(cfg))]
+    return [
+        _drawtext_score_stage(cfg, score.text_before(cfg), enable=f"lt(t,{local_flip:.3f})"),
+        _drawtext_score_stage(cfg, score.text_after(cfg), enable=f"gte(t,{local_flip:.3f})"),
+    ]
+
+
 def _run_ffmpeg(args: list[str]) -> None:
     subprocess.run(["ffmpeg", "-v", "error", "-y", *args], check=True)
 
@@ -102,14 +188,25 @@ def _encode_piece(
     out_path: Path,
     cfg: ReviewConfig | ExportConfig,
     epoch_base: float | None = None,
+    score: ScoreOverlay | None = None,
+    piece_start: float = 0.0,
 ) -> None:
     """Encode one piece. `epoch_base` (Unix epoch of the piece's first frame)
-    burns a wall-clock overlay on -- export path only; review clips never pass
-    one, so they stay clean."""
+    burns a wall-clock overlay on, and `score` burns a running goal counter
+    on -- export path only; review clips never pass either, so they stay
+    clean.
+
+    `piece_start` is this piece's offset into the WHOLE clip, needed to
+    rebase the score flip onto this piece's own timeline. It is 0.0 for a
+    single-piece clip, and the accumulated offset for a chunk-spanning or
+    segmented one."""
     audio_args = ["-ac", "1"] if cfg.mono_audio else []
     video_filter = f"{_scale_filter(cfg.max_width)},fps={cfg.fps}"
     if epoch_base is not None and isinstance(cfg, ExportConfig) and cfg.burn_in_time:
         video_filter += f",{_drawtext_filter(cfg, epoch_base)}"
+    if score is not None and isinstance(cfg, ExportConfig) and cfg.burn_in_score:
+        for stage in _score_filters(cfg, score, piece_start, duration):
+            video_filter += f",{stage}"
     _run_ffmpeg(
         [
             "-ss", f"{start:.3f}",
@@ -144,7 +241,13 @@ def render_review_clip(slices: list[ChunkSlice], out_path: Path, tmp_dir: Path, 
         part_path.unlink(missing_ok=True)
 
 
-def render_export_clip(slices: list[ChunkSlice], out_path: Path, tmp_dir: Path, cfg: ExportConfig) -> None:
+def render_export_clip(
+    slices: list[ChunkSlice],
+    out_path: Path,
+    tmp_dir: Path,
+    cfg: ExportConfig,
+    score: ScoreOverlay | None = None,
+) -> None:
     """Render a (possibly chunk-boundary-spanning) interval as one
     full-resolution, re-encoded delivery clip, always sourced from the
     full-res .MP4 (never the .LRF proxy) -- unlike render_review_clip,
@@ -165,21 +268,27 @@ def render_export_clip(slices: list[ChunkSlice], out_path: Path, tmp_dir: Path, 
             out_path,
             cfg,
             epoch_base,
+            score,
         )
         return
 
     part_paths: list[Path] = []
+    piece_start = 0.0
     for i, cs in enumerate(slices):
         part_path = tmp_dir / f"{out_path.stem}_part{i}.mp4"
         epoch_base = slice_start_epoch(cs.chunk, cs.local_start_seconds)
+        duration = cs.local_end_seconds - cs.local_start_seconds
         _encode_piece(
             cs.chunk.mp4_path,
             cs.local_start_seconds,
-            cs.local_end_seconds - cs.local_start_seconds,
+            duration,
             part_path,
             cfg,
             epoch_base,
+            score,
+            piece_start,
         )
+        piece_start += duration
         part_paths.append(part_path)
 
     concat_clips(part_paths, out_path, force_reencode=False)

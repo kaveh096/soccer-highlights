@@ -355,8 +355,9 @@ def cmd_export_picks(
                 clip_path.unlink()
             interval = Interval(start_seconds=float(row["start_seconds"]), end_seconds=float(row["end_seconds"]))
             slices = map_interval_to_chunks(interval, chunks)
+            score = render.ScoreOverlay.from_sheet_row(row)
             print(f"Exporting {i + 1}/{len(clip_files)}: {clip_path.name} ({interval.end_seconds - interval.start_seconds:.1f}s)")
-            render.render_export_clip(slices, clip_path, tmp_dir, export_cfg)
+            render.render_export_clip(slices, clip_path, tmp_dir, export_cfg, score)
 
     print(f"\nExported {len(clip_files)} clip(s) to {out_dir}")
 
@@ -711,17 +712,33 @@ def cmd_pre_label(
     merged, _traces = _run_detection(cfg, chunks)
 
     sources = ["audio"] * len(merged)
+    score_columns: list[marks.ScoreColumns] | None = None
     if marks_csv or tally_csvs:
         active_marks, _undone, source_label = _load_marks(marks_csv, tally_csvs)
         audio_peaks = [p for interval in merged for p in interval.peaks]
         resolved = marks.resolve_marks(active_marks, chunks, audio_peaks, cfg.marks, cfg.timeline, clock_offset)
         n_gap = sum(1 for r in resolved if r.anchor == "unrecorded_gap")
-        merged, sources = marks.union_with_audio(merged, resolved)
+        combined = marks.union_with_audio_detailed(merged, resolved)
+        # Stretch peak-anchored clips to cover their own tap BEFORE anything
+        # renders or gets written down -- the review clips, the sheet's
+        # start/end and the eventual export all read from these intervals.
+        n_extended = marks.extend_for_score_flip(combined, cfg.marks)
+        merged = [iv for iv, _, _ in combined]
+        sources = [src for _, src, _ in combined]
+        events = marks.score_events(resolved)
+        score_columns = [marks.score_for_interval(iv, events, owner) for iv, _, owner in combined]
         n_mark = sources.count("mark")
         n_both = sources.count("both")
         print(
             f"Unioned {len(active_marks)} mark(s) from {source_label}: {n_both} corroborated an audio candidate, "
             f"{n_mark} added a NEW candidate audio missed, {n_gap} landed in an unrecorded gap (not renderable)"
+        )
+        white = sum(1 for _, team in events if team == "white")
+        black = sum(1 for _, team in events if team == "black")
+        print(
+            f"Score from marks: {white} - {black} ({len(events)} goal(s)); extended {n_extended} clip(s) to cover "
+            f"their tap. CHECK THIS AGAINST THE REAL FINAL SCORE before exporting -- one missed tap silently "
+            f"shifts every later clip's counter."
         )
 
     strategy_dir = Path(out_dir) / "candidates"
@@ -761,14 +778,27 @@ def cmd_pre_label(
     sheet_path = generate_review_sheet(strategy_dir)
     with open(sheet_path, encoding="utf-8") as f:
         sheet_rows = list(csv.DictReader(f))
+    score_headers = ["score_white", "score_black", "score_flip_seconds", "score_flip_team"]
     fieldnames = (
-        list(sheet_rows[0].keys()) + ["source", "gemini_score", "gemini_caption", "gemini_description"]
+        list(sheet_rows[0].keys())
+        + ["source"]
+        + score_headers
+        + ["gemini_score", "gemini_caption", "gemini_description"]
         if sheet_rows
         else []
     )
-    # sheet_rows, descriptions and sources are all in `merged` order.
-    for sheet_row, description, source in zip(sheet_rows, descriptions, sources):
+    # sheet_rows, descriptions, sources and score_columns are all in `merged` order.
+    blank_scores = [None] * len(sheet_rows)
+    for sheet_row, description, source, score in zip(
+        sheet_rows, descriptions, sources, score_columns or blank_scores
+    ):
         sheet_row["source"] = source
+        # Left blank without watch marks, which is what makes the counter
+        # simply not appear on an audio-only game.
+        sheet_row["score_white"] = score.white if score else ""
+        sheet_row["score_black"] = score.black if score else ""
+        sheet_row["score_flip_seconds"] = f"{score.flip_seconds:.2f}" if score and score.flip_seconds is not None else ""
+        sheet_row["score_flip_team"] = score.flip_team if score else ""
         sheet_row["gemini_score"] = description.score if description else ""
         sheet_row["gemini_caption"] = description.caption if description else ""
         sheet_row["gemini_description"] = description.description if description else ""
