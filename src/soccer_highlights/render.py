@@ -244,7 +244,20 @@ def _encode_piece(
     falls back to the standalone box it has always been drawn in. That
     fallback is what keeps an audio-only game looking exactly as it does
     today -- a scoreboard with empty team pills and no numbers would be
-    worse than no scoreboard."""
+    worse than no scoreboard.
+
+    The chrome PNG input MUST have `-loop 1` (2026-09-08, first real-data
+    discovery -- every prior scoreboard test was on hand-made/short data,
+    never a full-length real export). Without it, ffmpeg treats the single-
+    frame PNG as a 1-frame stream that hits EOF almost immediately, and
+    `overlay`'s eof-recovery path against a much longer main stream turned
+    out to be catastrophically slow AND produced a wildly bloated output --
+    measured on a real 4K 10-bit source: a 3s test segment went from >180s
+    wall time and 26-35MB (should be ~10MB) down to 90.8s and 10.18MB once
+    `-loop 1` was added. Confirmed via isolated ffmpeg CLI tests that this
+    is about the missing loop flag specifically, not the 10-bit source
+    (forcing 8-bit output alone did not fix it) and not frame size (halving
+    resolution alone did not fix it either)."""
     audio_args = ["-ac", "1"] if cfg.mono_audio else []
     base_filter = f"{_scale_filter(cfg.max_width)},fps={cfg.fps}"
     encode_args = [
@@ -271,6 +284,7 @@ def _encode_piece(
                 "-ss", f"{start:.3f}",
                 "-i", str(source_path),
                 "-t", f"{duration:.3f}",
+                "-loop", "1",
                 "-i", str(chrome_path),
                 "-filter_complex", filter_complex,
                 "-map", "[vout]", "-map", "0:a?",
