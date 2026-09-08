@@ -138,6 +138,62 @@ marks) -> posted to a Telegram group with the Farsi caption.
   lost or wrongly timestamped), the camera position is per-game config rather
   than a watch button, and there is no dedicated sync button (the clap +
   `moment` tap IS the sync).
+- **Review order trusts taps over Gemini when they actively disagree**
+  (Kaveh, 2026-09-07, after reviewing Sep-06's real ranked sheet and finding
+  Gemini goal false positives on clips he'd explicitly tapped `moment`, i.e.
+  *not* a goal). `marks.review_tier`: a genuine goal tap
+  (`white_goal`/`black_goal`) decides tier 1 via `is_near_cam_goal` (the
+  per-game camera setup, see below) with Gemini's `goal_this_end` **not
+  consulted at all**; a `moment` tap can **never** reach tier 1 regardless of
+  what Gemini claims; an untapped clip (no mark at all) still falls back to
+  `goal_this_end`, since there's nothing to value over Gemini there. This
+  cuts both ways -- it also promotes a real tapped goal Gemini badly
+  underscored (seen on Sep-06: a confirmed near-cam goal tap Gemini scored
+  2/5, invisible under the old score-only ranking, surfaced near the top
+  once the tap alone was trusted).
+  - **`--near-cam-team-first-half {white,black}`** (`pre-label`) is the
+    per-game camera input this needs -- which team's goal the camera sits
+    behind in the FIRST half, swapping automatically at the auto-detected
+    halftime boundary (`discovery.detect_halftime_seconds`, the single
+    largest inter-chunk recording gap). Omit it and goal-tapped clips fall
+    back to `goal_this_end`, same as before 2026-09-07 -- forgetting this
+    input degrades gracefully, it doesn't break the run.
+  - **Same-category fixed-window marks that are close enough to overlap now
+    merge into one clip** (`marks._merge_same_category_fixed_windows`) --
+    two taps for what's really one event (typically an accidental
+    double-tap) used to render as two 90%-overlapping near-duplicate clips.
+    Cross-category pairs never merge. The existing "N goal taps inside one
+    clip -- only the first is drawn" warning is the signal a merge folded in
+    a likely double-tap; nothing auto-corrects the score for it.
+  - **The fixed-window fallback lookback is 15s, not 60s** (`MarksConfig.
+    goal_lookback_seconds`/`moment_lookback_seconds`, revised 2026-09-07 from
+    a full real game's worth of oversized 65s fallback clips -- evidence-based
+    now, not the original provisional guess). Lookahead stays 5s.
+  - **Open, not yet automated**: reliably telling "two real close-together
+    goals" apart from "one goal, accidentally double-tapped" well enough to
+    auto-correct the derived score (rather than merging the clip and leaving
+    the score as-is for Kaveh to eyeball) needs labeled real examples to
+    validate against -- deliberately deferred to the post-export Sep-06
+    analysis pass below, not guessed at mid-pipeline.
+  - **First real-game correction, for calibration**: Sep-06's tally showed
+    black 11, but two black-goal taps 6.8s apart with no audio peak near
+    either and near-identical Gemini descriptions turned out to be one goal,
+    double-tapped -- corrected to black 10 by hand (one row dropped, every
+    later clip's `score_black` decremented by 1). The Tallies undo button
+    (a `-1` count_change) only cancels its OWN category's most-recently-active
+    press, regardless of how long after -- it does NOT necessarily target
+    the mistake Kaveh remembers making, since something else in that
+    category could have been pressed in between. Don't assume a decrement
+    found late in a review always explains the double-tap it's compared
+    against; check the actual timestamps.
+- **A game's watch-tagging quirks are worth a dedicated post-export pass, not
+  fixed reactively mid-review.** Sep-06 was the first real game with Tallies
+  data, and surfaced things worth analyzing properly once the picks are
+  locked in and exported: how well the assumed press-lag windows actually
+  held up, whether other double-taps or mis-corrected decrements are hiding
+  in the data, and whether a real "was this one goal or two" auto-correction
+  is worth building from labeled examples. Kaveh's own plan (2026-09-07):
+  come back to this after export, not before.
 - **Recall-first.** Throughout audio tuning and vision work, the standing priority
   is "don't miss real events" over "don't bombard with false positives." A change
   that only cuts precision at the cost of recall is not obviously a net win.

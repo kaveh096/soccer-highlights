@@ -142,6 +142,10 @@ class LabeledRow:
     interval: Interval
     verdict: str  # TP / FP / TN / FN
     notes: str
+    # generate_description's tap_context, per-row (2026-09-07) -- None for
+    # every existing caller (batch-review, label-audit, sweep_prompt.py),
+    # which never set this and shouldn't have to change to keep working.
+    tap_context: str | None = None
 
 
 @dataclass
@@ -279,6 +283,32 @@ def load_review_rows(review_root: Path) -> list[LabeledRow]:
     return rows
 
 
+_TAP_CONTEXT_MARKER = "Rate how highlight-worthy this clip is"
+
+_TAP_CONTEXT_INSERT = (
+    "The person recording tapped a live marker indicating {tap_claim}. Before finalizing goal_this_end, "
+    "specifically re-examine the moment this tap would correspond to: if the tap says a goal happened here but "
+    "your first read doesn't show one clearly, look again for a near-post finish, a keeper-obscured shot, or a "
+    "quick tap-in before ruling it out; if the tap says this was NOT a goal, be correspondingly cautious about "
+    "calling one yourself.\n\n"
+)
+
+
+def _build_describe_prompt(prompt_template: str, duration_seconds: float, tap_context: str | None) -> str:
+    """Insert the tap-context sentence (see generate_description's
+    `tap_context` param) right before the scoring scale, then fill in
+    duration. Split out as a pure function so the prompt-construction logic
+    is unit-tested even though the API call itself isn't (project
+    convention -- see this module's docstring)."""
+    prompt = prompt_template
+    if tap_context:
+        if _TAP_CONTEXT_MARKER not in prompt:
+            print("WARNING: tap_context given but the prompt has no insertion point -- ignoring tap_context")
+        else:
+            prompt = prompt.replace(_TAP_CONTEXT_MARKER, _TAP_CONTEXT_INSERT.format(tap_claim=tap_context) + _TAP_CONTEXT_MARKER)
+    return prompt.format(duration=duration_seconds)
+
+
 def generate_description(
     clip_path: Path,
     duration_seconds: float,
@@ -286,6 +316,7 @@ def generate_description(
     prompt_template: str | None = None,
     fps: int = 15,
     response_schema: dict | None = _DESCRIBE_RESPONSE_SCHEMA_V2,
+    tap_context: str | None = None,
 ) -> DescribeResult | None:
     """Score an already-rendered clip (the same file a human labels/labeled)
     -- no ffmpeg extraction here anymore (2026-07-28): review, describe, and
@@ -347,7 +378,34 @@ def generate_description(
     (e.g. prompt_template=_DESCRIBE_PROMPT, fps=5, response_schema=None
     for the original v1 production behavior, or fps=10 for the last
     sweep-validated value). cfg.model selects flash vs pro -- GeminiConfig's
-    default (gemini-flash-latest) is correct, do not change it to pro."""
+    default (gemini-flash-latest) is correct, do not change it to pro.
+
+    tap_context (2026-09-07, adopted): an optional one-line claim from the
+    watch tap that anchored/corroborated this candidate -- e.g. "the
+    dark/black team scored a goal", or "something notable happened here,
+    but it was NOT tapped as a goal" (see marks.py's mark_category; None
+    when there's no tap at all, or the caller doesn't wire one up). Inserted
+    by _build_describe_prompt right before the scoring scale, cueing Gemini
+    to re-examine the tapped moment specifically -- NOT asserting the tap as
+    settled fact, deliberately: a 5-clip eval on real Sep-06 data
+    (2026-09-07) compared this "re-examine" wording against two rejected
+    alternatives on the same clips. A softer "just a hint, weigh it"
+    phrasing fixed the same missed goal but also flipped an
+    ALREADY-correct clip to wrong -- its output showed fabricated timestamps
+    and a different event sequence not present under any other prompt,
+    i.e. it invited more hedged invention, not more care. A blunt "the
+    recording confirms X" phrasing tied on this sample but states the tap
+    as ground truth rather than evidence, which risks fabricating a goal
+    outright the first time a tap is actually wrong -- a real risk this
+    tiny sample didn't happen to exercise. The adopted wording fixed a
+    confirmed missed goal (score 2->4, `goal_this_end` False->True) and a
+    confirmed Gemini-invented goal (score 4->3, True->False) with zero
+    regressions on 3 already-correct clips. One thing this did NOT fix,
+    still open: a moment-tapped clip whose OWN Gemini description clearly
+    described a real goal (players audibly shouting "Gol") stayed a "goal"
+    under every prompt tested, baseline included -- almost certainly a real
+    tap mis-classification (mistapped `moment` instead of a goal counter),
+    not a prompt problem; don't expect this parameter to fix that case."""
     import os
 
     api_key = os.environ.get(cfg.api_key_env)
@@ -355,7 +413,7 @@ def generate_description(
         raise RuntimeError(f"{cfg.api_key_env} is not set -- see README's Vision AI section for setup")
 
     try:
-        prompt = (prompt_template or _DESCRIBE_PROMPT_V2).format(duration=duration_seconds)
+        prompt = _build_describe_prompt(prompt_template or _DESCRIBE_PROMPT_V2, duration_seconds, tap_context)
         generation_config = (
             {"response_mime_type": "application/json", "response_schema": response_schema} if response_schema else None
         )
@@ -520,7 +578,14 @@ def run_describe_only(
 
         description = _describe_from_dict(entry.get("describe")) if entry else None
         if description is None:
-            description = describe_fn(row.clip_path, row.interval.end_seconds - row.interval.start_seconds, gemini_cfg)
+            duration = row.interval.end_seconds - row.interval.start_seconds
+            # tap_context is only ever set by pre-label's rows -- every other
+            # caller's describe_fn (sweep_prompt.py's, e.g.) keeps its plain
+            # 3-arg signature and is never asked to accept the new kwarg.
+            if row.tap_context is not None:
+                description = describe_fn(row.clip_path, duration, gemini_cfg, tap_context=row.tap_context)
+            else:
+                description = describe_fn(row.clip_path, duration, gemini_cfg)
 
         results.append(description)
         entries[i] = {

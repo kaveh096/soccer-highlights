@@ -6,6 +6,7 @@ from soccer_highlights.label_audit import (
     DescribeResult,
     JudgeVerdict,
     LabeledRow,
+    _build_describe_prompt,
     _parse_describe_json,
     _parse_judge_json,
     is_flagged,
@@ -99,10 +100,10 @@ def test_parse_judge_json_distance_out_of_range_raises():
         pass
 
 
-def _row(strategy="strike_loose", clip="clip_001.mp4", verdict="TP") -> LabeledRow:
+def _row(strategy="strike_loose", clip="clip_001.mp4", verdict="TP", tap_context=None) -> LabeledRow:
     return LabeledRow(
         strategy=strategy, clip_file=clip, clip_path=Path(f"output/review/{strategy}/{clip}"),
-        interval=Interval(0.0, 10.0), verdict=verdict, notes="",
+        interval=Interval(0.0, 10.0), verdict=verdict, notes="", tap_context=tap_context,
     )
 
 
@@ -224,6 +225,46 @@ def test_run_describe_only_calls_describe_for_every_row_no_judge(tmp_path):
     assert describe_calls == ["clip_001.mp4", "clip_002.mp4"]
     assert [r.description for r in results] == ["description for clip_001.mp4", "description for clip_002.mp4"]
     assert cache_path.exists()
+
+
+def test_build_describe_prompt_without_tap_context_is_unchanged():
+    template = "Some intro.\n\nRate how highlight-worthy this clip is: {duration:.1f}s."
+    assert _build_describe_prompt(template, 12.3, None) == "Some intro.\n\nRate how highlight-worthy this clip is: 12.3s."
+    assert _build_describe_prompt(template, 12.3, "") == "Some intro.\n\nRate how highlight-worthy this clip is: 12.3s."
+
+
+def test_build_describe_prompt_inserts_tap_context_before_the_scale():
+    template = "Some intro.\n\nRate how highlight-worthy this clip is: {duration:.1f}s."
+    prompt = _build_describe_prompt(template, 12.3, "the white team scored a goal")
+    assert "the white team scored a goal" in prompt
+    assert prompt.index("the white team scored a goal") < prompt.index("Rate how highlight-worthy")
+    assert prompt.endswith("12.3s.")  # duration still filled in after insertion
+
+
+def test_build_describe_prompt_warns_and_ignores_tap_context_with_no_marker(capsys):
+    template = "No marker here at all: {duration:.1f}s."
+    prompt = _build_describe_prompt(template, 5.0, "the white team scored a goal")
+    assert prompt == "No marker here at all: 5.0s."
+    assert "WARNING" in capsys.readouterr().out
+
+
+def test_run_describe_only_passes_tap_context_only_when_set(tmp_path):
+    """A describe_fn with the plain 3-arg signature (every existing caller,
+    e.g. sweep_prompt.py's) must keep working untouched -- tap_context is
+    only ever passed when a row actually has one (pre-label's rows)."""
+    rows = [_row(clip="clip_001.mp4", tap_context="the white team scored a goal"), _row(clip="clip_002.mp4")]
+    calls = []
+
+    def fake_describe(clip_path, duration, cfg, tap_context=None):
+        calls.append((clip_path.name, tap_context))
+        return _describe()
+
+    run_describe_only(rows, gemini_cfg=None, cache_path=tmp_path / "descriptions.json", describe_fn=fake_describe)
+
+    assert calls == [
+        ("clip_001.mp4", "the white team scored a goal"),
+        ("clip_002.mp4", None),
+    ]
 
 
 def test_run_describe_only_resumes_and_retries_only_failed_entries(tmp_path):

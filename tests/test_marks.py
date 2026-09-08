@@ -15,6 +15,10 @@ from soccer_highlights.marks import (
     merge_tally_marks,
     resolve_marks,
     resolve_undos,
+    is_near_cam_goal,
+    review_sort_key,
+    review_tier,
+    tap_claim,
     score_events,
     score_for_interval,
     union_with_audio,
@@ -108,10 +112,16 @@ def test_load_tallies_csv_parses_the_real_bench_test_export(tmp_path):
 
     marks = load_tallies_csv(csv_path, "white_goal")
 
-    # +1 at ...495354, then two -1s (only one has anything left to cancel),
-    # then +1,+1, then +1, then +1 -1. Net surviving: 3.
-    assert [m.category for m in marks] == ["white_goal"] * 3
-    assert [m.timestamp.timestamp() for m in marks] == [1788407522303 / 1000, 1788407522616 / 1000, 1788407632369 / 1000]
+    # Decrements are NOT auto-resolved (2026-09-07) -- every positive press
+    # survives as a Mark regardless of any -1 rows around it.
+    assert [m.category for m in marks] == ["white_goal"] * 5
+    assert [m.timestamp.timestamp() for m in marks] == [
+        1788407495354 / 1000,
+        1788407522303 / 1000,
+        1788407522616 / 1000,
+        1788407632369 / 1000,
+        1788407755313 / 1000,
+    ]
 
 
 def test_load_tallies_csv_ignores_non_click_rows(tmp_path):
@@ -127,20 +137,19 @@ def test_load_tallies_csv_ignores_non_click_rows(tmp_path):
     assert len(load_tallies_csv(csv_path, "black_goal")) == 1
 
 
-def test_load_tallies_csv_minus_is_scoped_to_its_own_counter_file(tmp_path):
-    # The reason per-counter undo can't go through the global resolve_undos
-    # stack: a minus on the white counter must cancel a WHITE goal, even
-    # though a black goal was the most recent press overall.
+def test_load_tallies_csv_decrements_are_not_auto_resolved(tmp_path, capsys):
+    # 2026-09-07 (Kaveh, after Sep-06's real data): a decrement is no longer
+    # popped against the most-recently-active press -- it's counted and
+    # warned about, but every positive press survives regardless.
     white = tmp_path / "white.csv"
     white.write_text(
         "timestamp,count,count_change,action\n1788407400000,1,1,CLICK\n1788407600000,0,-1,CLICK\n", encoding="utf-8"
     )
-    black = tmp_path / "black.csv"
-    black.write_text("timestamp,count,count_change,action\n1788407500000,1,1,CLICK\n", encoding="utf-8")
 
-    merged = merge_tally_marks(load_tallies_csv(white, "white_goal") + load_tallies_csv(black, "black_goal"))
+    marks = load_tallies_csv(white, "white_goal")
 
-    assert [m.category for m in merged] == ["black_goal"]
+    assert [m.category for m in marks] == ["white_goal"]  # the +1 survives despite the later -1
+    assert "1 decrement(s)" in capsys.readouterr().out
 
 
 def test_merge_tally_marks_orders_by_timestamp_across_files_and_numbers_sequences(tmp_path):
@@ -248,13 +257,16 @@ def test_union_with_audio_adds_a_new_candidate_audio_missed():
     intervals, sources = union_with_audio(audio, resolved)
 
     assert sources == ["audio", "mark"]
-    assert intervals[1].start_seconds == 70.0  # the wide fallback window
+    assert intervals[1].start_seconds == 115.0  # the wide fallback window (15s lookback)
 
 
 def test_union_with_audio_does_not_credit_audio_for_a_merely_overlapping_candidate():
-    """A fixed_window mark's 60s fallback often overlaps an unrelated older
-    candidate. Provenance follows the anchor, not geometry -- otherwise this
-    would be mislabeled `both` and silently erase a recall miss."""
+    """A fixed_window mark's fallback can still overlap an unrelated older
+    candidate on a wide-enough config. Provenance follows the anchor, not
+    geometry -- otherwise this would be mislabeled `both` and silently erase
+    a recall miss. Uses an explicit wide lookback (the pre-2026-09-07
+    default) so the scenario reproduces regardless of the production
+    default's current value."""
     start = datetime(2026, 8, 23, 8, 0, 0)
     chunks = [_chunk(1, start, duration=1000.0, global_start=0.0)]
     # An unrelated candidate at 75-85s, well inside the mark's 70-135s
@@ -262,13 +274,52 @@ def test_union_with_audio_does_not_credit_audio_for_a_merely_overlapping_candida
     stale_peak = GlobalPeak(time_seconds=80.0, score=5.0)
     audio = [Interval(start_seconds=75.0, end_seconds=85.0, peaks=[stale_peak])]
     mark = Mark(sequence=1, timestamp=_local(2026, 8, 23, 8, 2, 10), category="white_goal")
-    resolved = resolve_marks([mark], chunks, [stale_peak], MarksConfig(), TimelineConfig())
+    wide_cfg = MarksConfig(goal_lookback_seconds=60.0)
+    resolved = resolve_marks([mark], chunks, [stale_peak], wide_cfg, TimelineConfig())
 
     intervals, sources = union_with_audio(audio, resolved)
 
     # Sorted by start, so the mark's wide window (from 70s) sorts first.
     assert sources == ["mark", "audio"]
     assert intervals[0].start_seconds == 70.0
+
+
+def test_union_with_audio_detailed_merges_close_same_category_fixed_window_marks():
+    """2026-09-07: two black_goal taps 6.8s apart on a real game (neither
+    found an audio peak) rendered as two 90%-overlapping clips. Same-category
+    fixed-window fallbacks that overlap should collapse into one clip."""
+    chunks = [_chunk(1, datetime(2026, 8, 23, 8, 0, 0), duration=1000.0, global_start=0.0)]
+    marks = [
+        _goal_mark(1, 8, 8, 15, "black_goal"),  # global 495.0
+        _goal_mark(2, 8, 8, 22, "black_goal"),  # global 502.0, 7s later
+    ]
+    resolved = resolve_marks(marks, chunks, [], MarksConfig(), TimelineConfig())
+
+    combined = union_with_audio_detailed([], resolved)
+
+    assert len(combined) == 1
+    interval, source, owner = combined[0]
+    assert source == "mark"
+    assert owner.mark.sequence == 1  # the earlier tap represents the merged group
+    # Spans both taps' individual fallback windows (15s lookback/5s lookahead).
+    assert interval.start_seconds == 480.0  # 495 - 15
+    assert interval.end_seconds == 507.0  # 502 + 5
+
+
+def test_union_with_audio_detailed_does_not_merge_across_categories():
+    """A white_goal and a black_goal close together are still two different
+    events, even if their fallback windows overlap."""
+    chunks = [_chunk(1, datetime(2026, 8, 23, 8, 0, 0), duration=1000.0, global_start=0.0)]
+    marks = [
+        _goal_mark(1, 8, 8, 15, "white_goal"),
+        _goal_mark(2, 8, 8, 22, "black_goal"),
+    ]
+    resolved = resolve_marks(marks, chunks, [], MarksConfig(), TimelineConfig())
+
+    combined = union_with_audio_detailed([], resolved)
+
+    assert len(combined) == 2
+    assert {owner.mark.category for _, _, owner in combined} == {"white_goal", "black_goal"}
 
 
 def test_union_with_audio_skips_marks_in_unrecorded_gaps():
@@ -429,6 +480,101 @@ def test_score_for_interval_falls_back_to_the_midpoint_when_the_tap_is_outside_i
 
     assert cols.flip_seconds == 7.0  # midpoint of a 14s clip
     assert cols.flip_team == "black"
+
+
+def test_review_tier_untapped_clip_still_falls_back_to_goal_this_end():
+    # No tap at all -- nothing to "value over Gemini", so goal_this_end alone
+    # still decides tier 1, same as before 2026-09-07.
+    assert review_tier(mark_category="", gemini_score=1, goal_this_end=True) == 1
+    assert review_tier(mark_category="", gemini_score=4, goal_this_end=False) == 3
+    assert review_tier(mark_category="", gemini_score=2, goal_this_end=False) == 5
+
+
+def test_review_tier_a_moment_tap_never_reaches_tier_1_even_if_gemini_calls_it_a_goal():
+    # 2026-09-07 (r03/r07 on Sep-06): an explicit non-goal tap overrides a
+    # contradicting Gemini goal claim outright -- it doesn't just fail to
+    # promote it, moment can never be tier 1.
+    assert review_tier(mark_category="moment", gemini_score=4, goal_this_end=True) == 2
+    assert review_tier(mark_category="moment", gemini_score=2, goal_this_end=True) == 4
+
+
+def test_review_tier_moment_and_score_bands_below_tier_1():
+    assert review_tier(mark_category="moment", gemini_score=3, goal_this_end=False) == 2
+    assert review_tier(mark_category="", gemini_score=4, goal_this_end=False) == 3
+    assert review_tier(mark_category="moment", gemini_score=1, goal_this_end=False) == 4
+    assert review_tier(mark_category="", gemini_score=2, goal_this_end=False) == 5
+
+
+def test_review_tier_goal_tap_ignores_gemini_when_near_cam_info_is_available():
+    # 2026-09-07: once a real goal tap AND the per-game camera config are
+    # both available, goal_this_end is not consulted at all -- taps win the
+    # conflict in both directions.
+    assert review_tier(mark_category="black_goal", gemini_score=1, goal_this_end=False, is_near_cam_goal=True) == 1
+    assert review_tier(mark_category="black_goal", gemini_score=5, goal_this_end=True, is_near_cam_goal=False) == 3
+
+
+def test_review_tier_goal_tap_falls_back_to_goal_this_end_without_camera_config():
+    # is_near_cam_goal=None means the per-game camera config wasn't given --
+    # degrades to the pre-2026-09-07 goal_this_end-driven behavior.
+    assert review_tier(mark_category="white_goal", gemini_score=2, goal_this_end=True, is_near_cam_goal=None) == 1
+    assert review_tier(mark_category="white_goal", gemini_score=2, goal_this_end=False, is_near_cam_goal=None) == 5
+
+
+def test_review_tier_the_clap_sync_moment_skips_the_moment_boost():
+    # Same inputs as a normal promoted moment, except is_sync_clap=True --
+    # the kickoff clap-sync tap is a timing reference, not a real candidate,
+    # so it must NOT land in tier 2 or 4 just for being mark_category=moment.
+    assert review_tier(mark_category="moment", gemini_score=3, goal_this_end=False, is_sync_clap=True) == 5
+    assert review_tier(mark_category="moment", gemini_score=1, goal_this_end=False, is_sync_clap=True) == 5
+    # A high enough plain score still earns tier 3 on its own merits.
+    assert review_tier(mark_category="moment", gemini_score=4, goal_this_end=False, is_sync_clap=True) == 3
+
+
+def test_review_sort_key_orders_tiers_then_score_then_time():
+    clips = [
+        ("far_goal_score2", "black_goal", 2, False, 500.0, False),
+        ("near_goal_score3", "black_goal", 3, False, 300.0, True),
+        ("moment_score3", "moment", 3, False, 100.0, False),
+        ("near_goal_score5", "white_goal", 5, False, 10.0, True),
+        ("plain_score4", "", 4, False, 50.0, False),
+        ("moment_score1", "moment", 1, False, 20.0, False),
+    ]
+    ranked = sorted(
+        clips,
+        key=lambda c: review_sort_key(
+            mark_category=c[1], gemini_score=c[2], goal_this_end=c[3], start_seconds=c[4], is_near_cam_goal=c[5]
+        ),
+    )
+    assert [name for name, *_ in ranked] == [
+        "near_goal_score5",  # tier 1, higher score
+        "near_goal_score3",  # tier 1, lower score
+        "moment_score3",  # tier 2
+        "plain_score4",  # tier 3
+        "moment_score1",  # tier 4
+        "far_goal_score2",  # tier 5
+    ]
+
+
+def test_is_near_cam_goal_by_half_and_team():
+    # 2026-09-06 setup: cam behind black's goal in half 1 (white_goal near),
+    # swapped in half 2 (black_goal near).
+    assert is_near_cam_goal("white_goal", 100.0, halftime_seconds=1000.0, near_cam_team_first_half="white") is True
+    assert is_near_cam_goal("black_goal", 100.0, halftime_seconds=1000.0, near_cam_team_first_half="white") is False
+    assert is_near_cam_goal("black_goal", 1500.0, halftime_seconds=1000.0, near_cam_team_first_half="white") is True
+    assert is_near_cam_goal("white_goal", 1500.0, halftime_seconds=1000.0, near_cam_team_first_half="white") is False
+
+
+def test_tap_claim_by_category():
+    assert tap_claim("white_goal") == "the white team scored a goal"
+    assert tap_claim("black_goal") == "the dark/black team scored a goal"
+    assert tap_claim("moment") == "something notable happened here, but it was NOT tapped as a goal"
+    assert tap_claim("") is None
+
+
+def test_is_near_cam_goal_false_when_per_game_info_is_missing():
+    assert is_near_cam_goal("white_goal", 100.0, halftime_seconds=None, near_cam_team_first_half="white") is False
+    assert is_near_cam_goal("white_goal", 100.0, halftime_seconds=1000.0, near_cam_team_first_half=None) is False
+    assert is_near_cam_goal("moment", 100.0, halftime_seconds=1000.0, near_cam_team_first_half="white") is False
 
 
 def test_extend_for_score_flip_stretches_a_clip_to_cover_its_own_tap():

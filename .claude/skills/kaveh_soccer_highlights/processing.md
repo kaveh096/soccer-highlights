@@ -253,8 +253,16 @@ cd C:/dev/soccer-highlights
   [--tally-csv "white_goal=G:/.../<date>/Raw/tally_white_goal.csv"] \
   [--tally-csv "black_goal=G:/.../<date>/Raw/tally_black_goal.csv"] \
   [--tally-csv "moment=G:/.../<date>/Raw/tally_moment.csv"] \
-  [--clock-offset-seconds <from Step 0c, usually omit>]
+  [--clock-offset-seconds <from Step 0c, usually omit>] \
+  [--near-cam-team-first-half {white,black}]
 ```
+
+**`--near-cam-team-first-half`** (added 2026-09-07): which team's goal the
+camera sits behind in the FIRST half -- ask Kaveh every game, it's not
+derivable from the footage. Drives review order's near-field-goal tier
+ahead of Gemini's `goal_this_end` for any genuine goal tap (see SKILL.md's
+settled-decisions list). Halftime is auto-detected from the recording gap;
+omitting the flag just falls back to `goal_this_end`, not a broken run.
 
 **Pass the same `--tally-csv` flags here that Step 0c used.** They union the
 watch marks with the audio candidates, so a goal the watch caught but audio
@@ -290,15 +298,23 @@ settled-decisions list) -> writes `review_sheet.csv` with `gemini_score` (1-5),
 renders in well under 15 minutes. The describe calls are the slower part.
 
 **Gemini 503 "high demand" congestion is common and not a bug.** `pre-label`
-re-runs detection+render every time (not cache-aware for that part), but the
-describe step IS resumable (`descriptions_cache.json`, only retries `null`
-entries). If a run finishes with failures, just re-run the exact same command --
-it'll skip everything already rendered/described and only retry what failed.
-Expect needing 2-3 retry rounds during a sustained congestion window (seen
-37->23->6->1->0 failures across rounds in practice, and separately 27->9->3->0
-on Aug-30). If a JSON cache read mid-write looks truncated (fewer entries than
-expected), that's a transient race with the writer, not real data loss --
-re-check a moment later.
+re-runs detection+render every time (**confirmed 2026-09-06: there is no
+skip-if-exists check on the render loop at all** -- re-running always
+redoes the full render pass, ~35-40 min on this laptop for a full game),
+but the describe step IS resumable (`descriptions_cache.json`, only retries
+`null` entries) -- a re-run costs a full render redo but pays for Gemini
+calls only once per clip. Expect needing 2-3 retry rounds during a sustained
+congestion window (seen 37->23->6->1->0 failures across rounds in practice,
+and separately 27->9->3->0 on Aug-30). If a JSON cache read mid-write looks
+truncated (fewer entries than expected), that's a transient race with the
+writer, not real data loss -- re-check a moment later. A single Gemini
+`429 RESOURCE_EXHAUSTED` (prepayment credits depleted, not congestion) needs
+Kaveh to add credits at ai.studio/projects before any retry will help --
+don't burn a render pass retrying a billing error. For a lone straggler
+clip after credits are fixed, it's cheaper to call
+`label_audit.generate_description` directly on the already-rendered clip
+and patch `descriptions_cache.json` + `review_sheet.csv` by hand than to
+redo a full render pass for one clip (done this way 2026-09-06).
 
 **Checking `descriptions_cache.json` success count: use the nested `describe`
 field, not list-entry truthiness.** Each entry is always a dict (`{strategy,
@@ -390,6 +406,17 @@ Renames `clip_002.mp4` -> `r01_s4_746a_c002.mp4`: **r**eview rank, gemini
 **s**core, wall-clock time, and the canonical **c**lip id. The point is that the
 folder's default A-Z sort becomes the review order (best first, chronological
 within a score band) instead of burying the good clips among the 2s.
+
+**On a watch-tagged sheet, rank is tiered, not just score-sorted** (revised
+2026-09-07, `marks.review_tier`): tier 1 is a genuine goal tap
+(`white_goal`/`black_goal`) confirmed near-cam by `--near-cam-team-first-half`,
+or (no tap at all) `goal_this_end`; tier 2 is a `moment` tap Gemini still
+rates >=3; tier 3 is any other clip scoring >=4; tier 4 is any other `moment`
+tap; tier 5 is everything else by score. A `moment` tap never reaches tier 1
+even if Gemini claims a goal -- see SKILL.md's settled-decisions list for the
+full "taps beat Gemini" rationale. A sheet without `mark_category`/
+`goal_this_end` (an older or audio-only game) falls back to the original
+plain score-desc sort, unchanged.
 
 - The `c0NN` token is what keeps every rename reversible and keeps the review
   sheet, the describe cache, `export-picks` and `telegram-post` all resolving to
@@ -693,3 +720,7 @@ fixed script):
 | Clap sync reports no peak near the moment mark | Clap not detected, or skew exceeds the search window | Check the camera RTC sync actually took before trusting that game's marks |
 | Marks reported "marked but not recorded" | Tapped while the camera was stopped between chunks | Nothing to render -- report them, don't let them silently vanish |
 | `pre-label` detection hangs with zero output on a same-day game | Reading `.LRF`/`.MP4` straight off Drive for a freshly-uploaded game can be very slow | `robocopy` the `.LRF`s local first (`--lrf-cache-dir`) proactively, don't wait for the `STATUS_IN_PAGE_ERROR` symptom |
+| A detached `pre-label` process looks dead (`Get-Process -Id <launcher_pid>` shows 0% CPU or nothing) but the log is still growing | The venv `python.exe` launcher PID is a stub; the real work runs in a CHILD process with a different PID | Check `Get-CimInstance Win32_Process \| Where-Object {$_.Name -eq 'python.exe'}` for the real worker, or just compare the log/cache file's `LastWriteTime` to now -- recent write means alive, full stop |
+| A PowerShell `Where-Object {$_.CommandLine -match ...}` filter via the Bash tool's nested `-Command` string returns empty even though the process is alive | Backslash-escaping `\$_` inside the Bash tool's double-quoted `-Command` string breaks the filter silently | Don't escape `$_`; if it still misbehaves, skip the filter and just check `LastWriteTime` |
+| Full 5-chunk audio decode gets OOM-killed | This laptop has only 8GB RAM, and other concurrent work (browser, other Claude sessions, other scripts) eats into the ~4GB typically free | Don't re-run `_run_detection`/`extract_audio_samples` just to recompute categories/provenance -- reconstruct from `events.json`'s cached peaks instead (no decode), cross-checking against the sheet's real `source` column before trusting it |
+| MP4s won't fit on Drive/local disk for a same-day game | Full-res chunks are ~17GB each | Point `--source-dir` straight at the memory card (e.g. `D:/DCIM/DJI_001`) instead of copying to Drive -- copy just the small `.LRF` proxies there too (`robocopy ... *.LRF`) so `discover_chunks` finds matching pairs; keep `--out-dir`/tally CSV paths on Drive as usual. Card reads are local, not subject to the Google-Drive-path slowness this skill otherwise warns about |

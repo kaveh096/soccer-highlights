@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from soccer_highlights.discovery import Chunk, slice_start_epoch, wallclock_to_global
+from soccer_highlights.discovery import Chunk, detect_halftime_seconds, slice_start_epoch, wallclock_to_global
 
 
 def _chunk(sequence: int, start_time: datetime, duration: float, global_start: float) -> Chunk:
@@ -44,6 +44,38 @@ def test_wallclock_to_global_returns_none_inside_unrecorded_gap():
     ]
 
     assert wallclock_to_global(datetime(2026, 8, 23, 8, 3, 0), chunks) is None
+
+
+def test_detect_halftime_seconds_picks_the_single_largest_gap():
+    start1 = datetime(2026, 8, 23, 8, 0, 0)
+    # A small 3s hiccup between chunks 1/2, then a real 266s halftime break
+    # between chunks 2/3 -- the halftime detector must pick the LARGER one.
+    start2 = start1 + timedelta(seconds=100 + 3)
+    start3 = start2 + timedelta(seconds=100 + 266)
+    chunks = [
+        _chunk(1, start1, duration=100.0, global_start=0.0),
+        _chunk(2, start2, duration=100.0, global_start=100.0),
+        _chunk(3, start3, duration=100.0, global_start=200.0),
+    ]
+
+    assert detect_halftime_seconds(chunks) == 200.0  # chunk 3's global_start_seconds
+
+
+def test_detect_halftime_seconds_none_for_a_single_chunk():
+    chunks = [_chunk(1, datetime(2026, 8, 23, 8, 0, 0), duration=100.0, global_start=0.0)]
+
+    assert detect_halftime_seconds(chunks) is None
+
+
+def test_detect_halftime_seconds_none_for_a_continuous_recording():
+    start1 = datetime(2026, 8, 23, 8, 0, 0)
+    start2 = start1 + timedelta(seconds=100)  # back-to-back, no gap
+    chunks = [
+        _chunk(1, start1, duration=100.0, global_start=0.0),
+        _chunk(2, start2, duration=100.0, global_start=100.0),
+    ]
+
+    assert detect_halftime_seconds(chunks) is None
 
 
 def test_wallclock_to_global_returns_none_before_first_and_after_last():

@@ -99,6 +99,35 @@ def discover_chunks(source_dir: str | Path) -> list[Chunk]:
     return chunks
 
 
+def detect_halftime_seconds(chunks: list[Chunk]) -> float | None:
+    """The global-timeline position where the SINGLE largest wall-clock
+    recording gap between consecutive chunks ends -- i.e. where the second
+    half starts, on the assumption that the halftime break is the one
+    real, long stop in an otherwise near-continuous recording (any small
+    incidental gap between chunks is comfortably smaller). Used by
+    `marks.is_near_cam_goal` to know which half a goal tap falls in;
+    returns None for a single-chunk game (nothing to split) or any
+    genuinely ambiguous case (all gaps effectively zero).
+
+    Reuses the same gap computation `discover_chunks` already does for its
+    dropped-frames warning, just keeping the largest one instead of
+    warning on every gap over `_MAX_EXPECTED_GAP_SECONDS`."""
+    if len(chunks) < 2:
+        return None
+    ordered = sorted(chunks, key=lambda c: c.sequence)
+    best_gap = 0.0
+    best_global_start: float | None = None
+    for previous, current in zip(ordered, ordered[1:]):
+        previous_end_wallclock = previous.start_time.fromtimestamp(
+            previous.start_time.timestamp() + previous.duration_seconds
+        )
+        gap = (current.start_time - previous_end_wallclock).total_seconds()
+        if gap > best_gap:
+            best_gap = gap
+            best_global_start = current.global_start_seconds
+    return best_global_start
+
+
 def wallclock_to_global(w: datetime, chunks: list[Chunk]) -> float | None:
     """Inverse of the recorded-time axis global_start_seconds is built on:
     map a wall-clock instant back to a global-timeline offset.

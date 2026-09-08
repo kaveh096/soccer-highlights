@@ -324,17 +324,22 @@ class MarksConfig:
     # emitting wall-clock timestamps + a category) are trailing -- pressed
     # AFTER the event, not during it -- unlike an audio peak, which IS the
     # transient. Lag varies by category: a goal has a natural dead-ball
-    # pause (retrieve ball, walk back, restart) so realistically +10 to
-    # +45s; a mid-flow "moment" has no stoppage, so later and less
-    # reliable. Both windows are asymmetric and generous by default --
-    # tune per-category once real watch data exists, don't guess further.
+    # pause (retrieve ball, walk back, restart); a mid-flow "moment" has no
+    # stoppage, so later and less reliable.
     #
     # These are the FALLBACK clip windows -- used only when no audio peak is
     # found to anchor on. Wide is the safe direction here: with no peak, a
     # too-long clip is reviewable, a too-short one has missed the event.
-    goal_lookback_seconds: float = 60.0
+    #
+    # 60s (2026-09-05, pre-game) was a provisional, untested guess. Revised
+    # to 15s (2026-09-07) after reviewing a full real game's worth of
+    # fixed-window clips on Sep-06 -- 60s produced consistently oversized,
+    # hard-to-review clips (several 65s fallbacks where the real action was
+    # in the first third). Evidence-based now, not a guess -- revisit only
+    # with new evidence, not another guess.
+    goal_lookback_seconds: float = 15.0
     goal_lookahead_seconds: float = 5.0
-    moment_lookback_seconds: float = 60.0
+    moment_lookback_seconds: float = 15.0
     moment_lookahead_seconds: float = 5.0
     # The peak-SEARCH window is deliberately much tighter than the fallback
     # window above, and must stay that way (2026-09-02). Widening the search

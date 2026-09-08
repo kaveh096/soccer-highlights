@@ -115,7 +115,7 @@ from soccer_highlights import clipping, label_audit, marks, render, telegram, vi
 from soccer_highlights.audio import extract_audio_samples
 from soccer_highlights.config import Config, load_config, load_strategy_configs
 from soccer_highlights.detection import analyze
-from soccer_highlights.discovery import Chunk, discover_chunks
+from soccer_highlights.discovery import Chunk, detect_halftime_seconds, discover_chunks
 from soccer_highlights.golden import GoldenScore, load_golden_events, score_intervals_against_golden
 from soccer_highlights.metadata import ChunkTrace, plot_debug, write_events_json
 from soccer_highlights.scoring import format_score_report, generate_all_review_sheets, generate_review_sheet, score_all
@@ -662,6 +662,7 @@ def cmd_pre_label(
     marks_csv: str | None = None,
     tally_csvs: list[str] | None = None,
     clock_offset: float = 0.0,
+    near_cam_team_first_half: str | None = None,
 ) -> None:
     """Detect candidates in a brand-new (not-yet-labeled) recording,
     render small/fast clips, generate a Gemini description for each (no
@@ -695,7 +696,16 @@ def cmd_pre_label(
     exactly the events audio detection missed, which is the recall number
     this whole feature exists to produce. Passing no marks leaves the
     behavior identical to audio-only, deliberately: forgetting the watch
-    must degrade gracefully, never break the weekly run."""
+    must degrade gracefully, never break the weekly run.
+
+    With --near-cam-team-first-half {white,black}: the per-game camera
+    setup (which team's goal the camera sits behind in the first half,
+    swapping after halftime) drives review order's near-field-goal check
+    (marks.is_near_cam_goal) instead of Gemini's goal_this_end for any
+    genuine goal tap -- see marks.review_tier. Halftime is auto-detected as
+    the single largest inter-chunk recording gap
+    (discovery.detect_halftime_seconds). Omitting the flag falls back to
+    goal_this_end for goal-tapped clips too, same as before 2026-09-07."""
     if not os.environ.get(cfg.gemini.api_key_env):
         raise SystemExit(f"pre-label requires {cfg.gemini.api_key_env} to be set (for Gemini descriptions).")
 
@@ -712,6 +722,9 @@ def cmd_pre_label(
     merged, _traces = _run_detection(cfg, chunks)
 
     sources = ["audio"] * len(merged)
+    mark_categories = [""] * len(merged)
+    is_sync_claps = [False] * len(merged)
+    is_near_cam_goals: list[bool | None] = [None] * len(merged)
     score_columns: list[marks.ScoreColumns] | None = None
     if marks_csv or tally_csvs:
         active_marks, _undone, source_label = _load_marks(marks_csv, tally_csvs)
@@ -725,6 +738,45 @@ def cmd_pre_label(
         n_extended = marks.extend_for_score_flip(combined, cfg.marks)
         merged = [iv for iv, _, _ in combined]
         sources = [src for _, src, _ in combined]
+        # Which tally counter (if any) anchored/corroborated this candidate --
+        # "audio" rows with no owner get "". Exists so review ordering can tell
+        # a moment-tagged non-goal apart from a goal-mark or a plain audio hit
+        # (`source` alone can't: a moment mark that found no audio peak looks
+        # identical to a goal mark that found no audio peak there).
+        mark_categories = [owner.mark.category if owner else "" for _, _, owner in combined]
+        # The clap-sync tap (Step 0c) is the game's chronologically-first
+        # `moment` mark -- a timing reference, not a real candidate, so review
+        # order must not give it the moment tiers' boost (Kaveh, 2026-09-06,
+        # after it ranked highly on a real game). Identified by the resolved
+        # mark itself, not by clip position, since a moment's fixed-window
+        # fallback can start well before the mark's own global_seconds.
+        moment_owners = [
+            (owner.global_seconds, id(owner))
+            for _, _, owner in combined
+            if owner is not None and owner.mark.category == "moment" and owner.global_seconds is not None
+        ]
+        sync_clap_owner_id = min(moment_owners)[1] if moment_owners else None
+        is_sync_claps = [
+            owner is not None and id(owner) == sync_clap_owner_id for _, _, owner in combined
+        ]
+        # Taps beat Gemini for review ordering (Kaveh, 2026-09-07): a genuine
+        # goal tap's near-field status is decided by the per-game camera
+        # setup, not goal_this_end. None (not False) when the flag or the
+        # halftime boundary isn't available, so review_tier knows to fall
+        # back to goal_this_end instead of treating it as a confirmed miss.
+        halftime_seconds = detect_halftime_seconds(chunks) if near_cam_team_first_half else None
+        camera_config_complete = near_cam_team_first_half is not None and halftime_seconds is not None
+        is_near_cam_goals = [
+            marks.is_near_cam_goal(owner.mark.category, owner.global_seconds, halftime_seconds, near_cam_team_first_half)
+            if (
+                camera_config_complete
+                and owner is not None
+                and owner.mark.category in ("white_goal", "black_goal")
+                and owner.global_seconds is not None
+            )
+            else None
+            for _, _, owner in combined
+        ]
         events = marks.score_events(resolved)
         score_columns = [marks.score_for_interval(iv, events, owner) for iv, _, owner in combined]
         n_mark = sources.count("mark")
@@ -766,8 +818,9 @@ def cmd_pre_label(
             interval=interval,
             verdict="",
             notes="",
+            tap_context=marks.tap_claim(mark_category),
         )
-        for i, interval in enumerate(merged, start=1)
+        for i, (interval, mark_category) in enumerate(zip(merged, mark_categories), start=1)
     ]
     cache_path = strategy_dir / "descriptions_cache.json"
     describe_fn = functools.partial(label_audit.generate_description, fps=fps) if fps is not None else None
@@ -781,18 +834,22 @@ def cmd_pre_label(
     score_headers = ["score_white", "score_black", "score_flip_seconds", "score_flip_team"]
     fieldnames = (
         list(sheet_rows[0].keys())
-        + ["source"]
+        + ["source", "mark_category", "is_sync_clap", "is_near_cam_goal"]
         + score_headers
-        + ["gemini_score", "gemini_caption", "gemini_description"]
+        + ["gemini_score", "goal_this_end", "gemini_caption", "gemini_description"]
         if sheet_rows
         else []
     )
-    # sheet_rows, descriptions, sources and score_columns are all in `merged` order.
+    # sheet_rows, descriptions, sources, mark_categories, is_sync_claps,
+    # is_near_cam_goals and score_columns are all in `merged` order.
     blank_scores = [None] * len(sheet_rows)
-    for sheet_row, description, source, score in zip(
-        sheet_rows, descriptions, sources, score_columns or blank_scores
+    for sheet_row, description, source, mark_category, is_sync_clap, is_near_cam, score in zip(
+        sheet_rows, descriptions, sources, mark_categories, is_sync_claps, is_near_cam_goals, score_columns or blank_scores
     ):
         sheet_row["source"] = source
+        sheet_row["mark_category"] = mark_category
+        sheet_row["is_sync_clap"] = str(is_sync_clap)
+        sheet_row["is_near_cam_goal"] = "" if is_near_cam is None else str(is_near_cam)
         # Left blank without watch marks, which is what makes the counter
         # simply not appear on an audio-only game.
         sheet_row["score_white"] = score.white if score else ""
@@ -800,6 +857,9 @@ def cmd_pre_label(
         sheet_row["score_flip_seconds"] = f"{score.flip_seconds:.2f}" if score and score.flip_seconds is not None else ""
         sheet_row["score_flip_team"] = score.flip_team if score else ""
         sheet_row["gemini_score"] = description.score if description else ""
+        sheet_row["goal_this_end"] = (
+            "" if description is None or description.goal_this_end is None else str(description.goal_this_end)
+        )
         sheet_row["gemini_caption"] = description.caption if description else ""
         sheet_row["gemini_description"] = description.description if description else ""
     with open(sheet_path, "w", newline="", encoding="utf-8") as f:
@@ -886,7 +946,27 @@ def cmd_name_candidates(cfg: Config, candidates_dir: str, revert: bool = False) 
                 "the pre-label describe pass first (re-run it -- the cache only retries failures)."
             )
         chunks = discover_chunks(cfg.input.source_dir)
-        ranked = sorted(rows, key=lambda r: (-int(r["gemini_score"]), float(r["start_seconds"])))
+        # goal_this_end/mark_category only exist on a watch-tagged game's sheet
+        # (added 2026-09-06) -- an older or audio-only sheet falls back to the
+        # plain score-desc order this always used, unchanged.
+        if rows and "goal_this_end" in rows[0] and "mark_category" in rows[0]:
+            def _tri_state_bool(value: str) -> bool | None:
+                value = value.strip().lower()
+                return {"true": True, "false": False}.get(value)
+
+            ranked = sorted(
+                rows,
+                key=lambda r: marks.review_sort_key(
+                    mark_category=r.get("mark_category", ""),
+                    gemini_score=int(r["gemini_score"]),
+                    goal_this_end=r.get("goal_this_end", "").strip().lower() == "true",
+                    start_seconds=float(r["start_seconds"]),
+                    is_near_cam_goal=_tri_state_bool(r.get("is_near_cam_goal", "")),
+                    is_sync_clap=r.get("is_sync_clap", "").strip().lower() == "true",
+                ),
+            )
+        else:
+            ranked = sorted(rows, key=lambda r: (-int(r["gemini_score"]), float(r["start_seconds"])))
         new_names = {}
         for rank, row in enumerate(ranked, start=1):
             clock = _wall_clock_tag(float(row["start_seconds"]), chunks)
@@ -1199,6 +1279,14 @@ def main() -> None:
         default=0.0,
         help="Seconds to add to every mark for watch-vs-camera clock skew (measure it first with ingest-marks)",
     )
+    pre_label_parser.add_argument(
+        "--near-cam-team-first-half",
+        default=None,
+        choices=["white", "black"],
+        help="Which team's goal the camera sits behind in the FIRST half (swaps automatically after the "
+        "auto-detected halftime gap). Drives review order's near-field-goal check ahead of Gemini's "
+        "goal_this_end for any genuine goal tap. Omit to fall back to goal_this_end, same as before 2026-09-07",
+    )
 
     name_candidates_parser = subparsers.add_parser(
         "name-candidates",
@@ -1299,6 +1387,7 @@ def main() -> None:
             args.marks_csv,
             args.tally_csv,
             args.clock_offset_seconds,
+            args.near_cam_team_first_half,
         )
     elif args.command == "name-candidates":
         cmd_name_candidates(cfg, args.candidates_dir, args.revert)

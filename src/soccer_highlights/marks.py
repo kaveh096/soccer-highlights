@@ -28,7 +28,7 @@ UTC = timezone.utc
 
 from soccer_highlights.config import MarksConfig, TimelineConfig
 from soccer_highlights.discovery import Chunk, wallclock_to_global
-from soccer_highlights.timeline import GlobalPeak, Interval
+from soccer_highlights.timeline import GlobalPeak, Interval, merge_intervals
 
 # DJI filename timestamps carry no timezone, and this rig only ever films
 # in one place -- pin the assumption explicitly (see SKILL.md's
@@ -109,18 +109,25 @@ def load_tallies_csv(path: str | Path, category: str) -> list[Mark]:
     adjusted, so it is warned about: after one, the counter total can no
     longer be trusted as a checksum against the number of press rows.
 
-    A negative `count_change` is Tallies' minus button, which is this
-    capture path's undo. It is resolved HERE, within this one counter's
-    file, rather than by `resolve_undos` -- with one counter per file, a
-    minus on the white counter must cancel a white goal, never "whatever
-    was tapped most recently across all three counters", which is what a
-    global stack would do."""
+    A negative `count_change` is Tallies' minus button. **Not auto-resolved
+    as an undo** (changed 2026-09-07, was pop-the-most-recently-active-press
+    before): Sep-06's real data showed a decrement landing 2.5 minutes after
+    the press it was meant to cancel, with nothing else in between for that
+    stack-based pop to trip over by luck -- but there is no guarantee of
+    that in general, and a late decrement silently cancelling the WRONG
+    earlier press (if something else in the same category happened in
+    between) would be worse than not resolving it at all. Kaveh's call:
+    keep every positive press as a real Mark unconditionally, and identify
+    the actual mis-taps by hand during candidate review, against real
+    footage, rather than have this module guess. Decrement rows are
+    counted and warned about, not silently dropped without a trace."""
     path = Path(path)
     if category not in CATEGORIES:
         raise ValueError(f"Unknown category {category!r} (expected one of {sorted(CATEGORIES)})")
 
     active: list[Mark] = []
     saw_edit = False
+    n_decrements = 0
     with open(path, encoding="utf-8-sig", newline="") as f:
         for row in csv.DictReader(f):
             action = row["action"].strip()
@@ -137,9 +144,15 @@ def load_tallies_csv(path: str | Path, category: str) -> list[Mark]:
                 if change > 1:
                     print(f"WARNING: {path.name}: count_change={change} at {timestamp} -- recording a single mark")
                 active.append(Mark(sequence=0, timestamp=timestamp, category=category))
-            elif change < 0 and active:
-                active.pop()
+            elif change < 0:
+                n_decrements += 1
 
+    if n_decrements:
+        print(
+            f"WARNING: {path.name}: {n_decrements} decrement(s) (Tallies' minus button) were NOT auto-resolved -- "
+            "every positive press is still kept as a Mark. Identify and remove any real mis-taps by hand during "
+            "candidate review."
+        )
     if saw_edit:
         print(
             f"WARNING: {path.name} contains an EDIT_TALLY row -- the counter total was manually edited, so it "
@@ -247,6 +260,43 @@ def resolve_marks(
     return resolved
 
 
+def _merge_same_category_fixed_windows(
+    extra: list[tuple[Interval, str, ResolvedMark]],
+) -> list[tuple[Interval, str, ResolvedMark]]:
+    """Merge fixed-window fallback candidates from the SAME tally category
+    when their clip windows touch or overlap -- two taps close enough in
+    time that their independent fallback windows collide should produce one
+    clip, not two near-identical ones (Kaveh, 2026-09-06, after two
+    black-goal taps 6.8s apart rendered as two 90%-overlapping clips on a
+    real game). The earliest tap's owner represents the merged group --
+    `score_for_interval`'s existing "N goal taps inside one clip" warning
+    fires naturally whenever a merge folds in more than one real goal event,
+    which is the intended surfacing of a likely double-tap; no separate
+    warning is added here. Cross-category pairs are never merged: a
+    white_goal and a black_goal close together are still two different
+    events."""
+    by_category: dict[str, list[tuple[Interval, str, ResolvedMark]]] = {}
+    for item in extra:
+        by_category.setdefault(item[2].mark.category, []).append(item)
+
+    merged: list[tuple[Interval, str, ResolvedMark]] = []
+    for group in by_category.values():
+        ordered = sorted(group, key=lambda item: item[0].start_seconds)
+        current_interval, current_source, current_owner = ordered[0]
+        for interval, source, owner in ordered[1:]:
+            if interval.start_seconds <= current_interval.end_seconds:
+                current_interval = Interval(
+                    start_seconds=current_interval.start_seconds,
+                    end_seconds=max(current_interval.end_seconds, interval.end_seconds),
+                    peaks=current_interval.peaks + interval.peaks,
+                )
+            else:
+                merged.append((current_interval, current_source, current_owner))
+                current_interval, current_source, current_owner = interval, source, owner
+        merged.append((current_interval, current_source, current_owner))
+    return merged
+
+
 def union_with_audio_detailed(
     audio_intervals: list[Interval], resolved: list[ResolvedMark]
 ) -> list[tuple[Interval, str, ResolvedMark | None]]:
@@ -260,7 +310,7 @@ def union_with_audio_detailed(
     lives in exactly one place."""
     sources = ["audio"] * len(audio_intervals)
     owners: list[ResolvedMark | None] = [None] * len(audio_intervals)
-    extra: list[tuple[Interval, str, ResolvedMark | None]] = []
+    extra: list[tuple[Interval, str, ResolvedMark]] = []
     for r in resolved:
         if r.anchor == "audio_peak" and r.interval is not None:
             peak_time = r.interval.peaks[0].time_seconds
@@ -272,7 +322,9 @@ def union_with_audio_detailed(
         elif r.anchor == "fixed_window" and r.interval is not None:
             extra.append((r.interval, "mark", r))
 
-    combined = list(zip(audio_intervals, sources, owners)) + extra
+    combined: list[tuple[Interval, str, ResolvedMark | None]] = list(
+        zip(audio_intervals, sources, owners)
+    ) + _merge_same_category_fixed_windows(extra)
     combined.sort(key=lambda triple: triple[0].start_seconds)
     return combined
 
@@ -334,6 +386,20 @@ def union_with_audio(
     be rendered and are reported separately."""
     combined = union_with_audio_detailed(audio_intervals, resolved)
     return [iv for iv, _, _ in combined], [src for _, src, _ in combined]
+
+
+def tap_claim(mark_category: str) -> str | None:
+    """A one-line natural-language claim for
+    `label_audit.generate_description`'s `tap_context` parameter (2026-09-07),
+    describing what a tally category means for describe-prompt purposes.
+    None for no tap at all -- there's nothing to tell Gemini."""
+    if mark_category == "white_goal":
+        return "the white team scored a goal"
+    if mark_category == "black_goal":
+        return "the dark/black team scored a goal"
+    if mark_category == "moment":
+        return "something notable happened here, but it was NOT tapped as a goal"
+    return None
 
 
 @dataclass
@@ -409,6 +475,110 @@ def score_for_interval(
             white=white, black=black, flip_seconds=midpoint, flip_team=_GOAL_CATEGORIES[owner.mark.category]
         )
     return ScoreColumns(white=white, black=black, flip_seconds=None, flip_team="")
+
+
+_OTHER_TEAM = {"white": "black", "black": "white"}
+
+
+def is_near_cam_goal(
+    mark_category: str,
+    global_seconds: float,
+    halftime_seconds: float | None,
+    near_cam_team_first_half: str | None,
+) -> bool:
+    """Whether a white_goal/black_goal tap happened at the camera's own end
+    of the field, per the per-game camera setup Kaveh gives directly
+    (2026-09-07 -- "Sep 6, cam was behind black team's goal capturing white
+    team's shots. At half time, it is swapped"). Camera position isn't
+    derivable from the footage or from Gemini, so this is the authoritative
+    signal for a genuine goal tap -- see `review_tier`, which stops
+    consulting `goal_this_end` at all once a goal-category mark and a
+    complete camera config are both available.
+
+    Returns False whenever the per-game input is incomplete (no halftime
+    boundary detected, or `near_cam_team_first_half` not given) -- the
+    caller is expected to treat that as "no info" (fall back to
+    goal_this_end via `review_tier`'s `is_near_cam_goal=None`), not as "far
+    end", so this function itself never needs to distinguish the two."""
+    if mark_category not in _GOAL_CATEGORIES or near_cam_team_first_half is None or halftime_seconds is None:
+        return False
+    scoring_team = _GOAL_CATEGORIES[mark_category]
+    near_cam_team = near_cam_team_first_half if global_seconds < halftime_seconds else _OTHER_TEAM[near_cam_team_first_half]
+    return scoring_team == near_cam_team
+
+
+def review_tier(
+    mark_category: str,
+    gemini_score: int,
+    goal_this_end: bool,
+    is_near_cam_goal: bool | None = None,
+    is_sync_clap: bool = False,
+) -> int:
+    """Bucket a pre-label candidate into a review-order tier -- lower reviews
+    first. Revised 2026-09-07 after reviewing Sep-06's real ranked sheet:
+    Kaveh found Gemini false-positive goal calls on `moment`-tagged clips he
+    knew weren't goals, and asked that **taps beat Gemini** whenever they
+    actively disagree, using the per-game camera setup rather than
+    `goal_this_end` to judge a genuine goal tap's visibility:
+
+    1. A genuine goal tap (`white_goal`/`black_goal`) at the camera's own
+       end of the field, per `is_near_cam_goal` -- Gemini is NOT consulted
+       here at all once a real goal tap exists. `is_near_cam_goal=None`
+       (the per-game camera config wasn't given) falls back to
+       `goal_this_end`, i.e. today's pre-2026-09-07 behavior, unchanged.
+    2. A `moment`-tagged, non-goal candidate Gemini still rates >=3 -- but
+       NEVER a case where `goal_this_end=True` contradicts the moment tap;
+       an explicit non-goal tap overrides Gemini's goal claim outright, it
+       doesn't just fail to promote it (2026-09-07: r03/r07 on Sep-06 were
+       exactly this -- Kaveh's own moment tap said "not a goal", Gemini said
+       "goal", and Gemini was wrong both times).
+    3. Any other candidate Gemini rates >=4 (a highlight regardless of
+       source) -- including a goal tap that failed its near-cam check, or
+       an untapped clip with no `goal_this_end` signal to lean on.
+    4. Any other `moment`-tagged candidate, whatever its score.
+    5. Everything else.
+
+    An untapped clip (`mark_category=""`) has nothing to "value over
+    Gemini" -- there's no tap, so `goal_this_end` alone still decides tier 1
+    for it, same as before.
+
+    `is_sync_clap` (2026-09-06): the clap-sync `moment` tap at kickoff
+    (Step 0c) is a timing reference, not a real highlight candidate --
+    never earns the tier 2/4 moment boost even though its mark_category is
+    genuinely "moment". A caller identifies it as the game's
+    chronologically-first `moment` mark."""
+    if mark_category in _GOAL_CATEGORIES:
+        if is_near_cam_goal is None:
+            if goal_this_end:
+                return 1
+        elif is_near_cam_goal:
+            return 1
+    elif mark_category == "moment":
+        if not is_sync_clap and gemini_score >= 3:
+            return 2
+    elif goal_this_end:
+        return 1
+
+    if gemini_score >= 4:
+        return 3
+    if mark_category == "moment" and not is_sync_clap:
+        return 4
+    return 5
+
+
+def review_sort_key(
+    mark_category: str,
+    gemini_score: int,
+    goal_this_end: bool,
+    start_seconds: float,
+    is_near_cam_goal: bool | None = None,
+    is_sync_clap: bool = False,
+) -> tuple[int, int, float]:
+    """Sort key for `name-candidates`' review-order rename: tier first, then
+    descending Gemini score within the tier, then chronological order as a
+    final, fully deterministic tiebreak."""
+    tier = review_tier(mark_category, gemini_score, goal_this_end, is_near_cam_goal, is_sync_clap)
+    return (tier, -gemini_score, start_seconds)
 
 
 @dataclass
