@@ -246,18 +246,31 @@ def _encode_piece(
     today -- a scoreboard with empty team pills and no numbers would be
     worse than no scoreboard.
 
-    The chrome PNG input MUST have `-loop 1` (2026-09-08, first real-data
-    discovery -- every prior scoreboard test was on hand-made/short data,
-    never a full-length real export). Without it, ffmpeg treats the single-
-    frame PNG as a 1-frame stream that hits EOF almost immediately, and
-    `overlay`'s eof-recovery path against a much longer main stream turned
-    out to be catastrophically slow AND produced a wildly bloated output --
-    measured on a real 4K 10-bit source: a 3s test segment went from >180s
-    wall time and 26-35MB (should be ~10MB) down to 90.8s and 10.18MB once
-    `-loop 1` was added. Confirmed via isolated ffmpeg CLI tests that this
-    is about the missing loop flag specifically, not the 10-bit source
-    (forcing 8-bit output alone did not fix it) and not frame size (halving
-    resolution alone did not fix it either)."""
+    Two compounding bugs here, both only surfacing on a real full-length
+    export (2026-09-08 -- every prior scoreboard test was on hand-made/
+    short data):
+
+    1. The chrome PNG input needs `-loop 1`. Without it, ffmpeg treats the
+       single-frame PNG as a 1-frame stream that hits EOF almost
+       immediately, and `overlay`'s eof-recovery path against a much
+       longer main stream is catastrophically slow.
+    2. `-t` MUST be an OUTPUT option (after -map, as it is now), not placed
+       between the two `-i` flags. ffmpeg's input-option parsing associates
+       an option before an `-i` with THAT upcoming input -- so `-t` sitting
+       between `-i source` and `-i chrome_path` was silently capping the
+       chrome PNG's own duration, not the export's. With `-loop 1` added
+       but `-t` left in that position, the PNG (now correctly looping)
+       still stopped at `-t` seconds, `overlay`'s eof_action=repeat then
+       held its last frame while the un-capped MAIN video kept decoding to
+       the end of the source chunk -- silently exporting several MINUTES
+       of footage instead of the intended clip. Caught because a "14.96s"
+       export came back as 368s.
+
+    Both had to be fixed together: `-loop 1` alone (bug 1 only) produced a
+    real duration bug that just happened to look like "still slow, still
+    bloated" on a partial download watched mid-run. Verified via isolated
+    ffmpeg CLI tests, forcing `-t` after `-map` to confirm exact output
+    duration, before trusting this against real export data again."""
     audio_args = ["-ac", "1"] if cfg.mono_audio else []
     base_filter = f"{_scale_filter(cfg.max_width)},fps={cfg.fps}"
     encode_args = [
@@ -283,11 +296,11 @@ def _encode_piece(
             [
                 "-ss", f"{start:.3f}",
                 "-i", str(source_path),
-                "-t", f"{duration:.3f}",
                 "-loop", "1",
                 "-i", str(chrome_path),
                 "-filter_complex", filter_complex,
                 "-map", "[vout]", "-map", "0:a?",
+                "-t", f"{duration:.3f}",
                 *encode_args,
                 str(out_path),
             ]
