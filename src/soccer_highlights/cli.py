@@ -370,6 +370,13 @@ def cmd_telegram_post(
     Caption is the clip's Farsi gemini_caption from the review sheet, if
     present, else just the clip_file name.
 
+    Always sent in CHRONOLOGICAL order (by the sheet's start_seconds),
+    regardless of the order `clip_files` is given in (2026-09-08, after
+    Sep-06 posted in rank/score order and read confusingly out of game
+    order) -- picks naturally arrive in review-rank order, not game order,
+    so this is the one place that reordering has to happen for it to be
+    right by default rather than by remembering to sort the --clips list.
+
     Tracks successfully-sent clips in <clips_dir>/.telegram_sent.json so a
     rerun after a partial failure doesn't double-post to the group -- unlike
     a redundant local render, a duplicate post is visible to everyone in the
@@ -380,6 +387,7 @@ def cmd_telegram_post(
     missing = [c for c in clip_files if c not in by_clip_file]
     if missing:
         raise SystemExit(f"clip_file(s) not found in {review_sheet_path}: {', '.join(missing)}")
+    clip_files = sorted(clip_files, key=lambda c: float(by_clip_file[c]["start_seconds"]))
 
     clips_dir_path = Path(clips_dir)
     missing_files = [c for c in clip_files if not (clips_dir_path / c).exists()]
@@ -792,6 +800,15 @@ def cmd_pre_label(
             f"their tap. CHECK THIS AGAINST THE REAL FINAL SCORE before exporting -- one missed tap silently "
             f"shifts every later clip's counter."
         )
+        outside = marks.marks_outside_their_clip(combined)
+        if outside:
+            print(
+                f"  {len(outside)} tap(s) land OUTSIDE their own clip even after extension -- those clips' "
+                f"score flips at a midpoint, not the tap, and never visibly change on screen:"
+            )
+            for o in outside:
+                where = "before it starts" if o.distance_seconds < 0 else "after it ends"
+                print(f"    seq={o.mark.mark.sequence:>3} {o.mark.mark.category:<10} {abs(o.distance_seconds):.1f}s {where}")
 
     strategy_dir = Path(out_dir) / "candidates"
     strategy_dir.mkdir(parents=True, exist_ok=True)
@@ -1054,6 +1071,14 @@ def cmd_ingest_marks(
     audio_peaks = [p for interval in merged for p in interval.peaks]
 
     resolved = marks.resolve_marks(active_marks, chunks, audio_peaks, cfg.marks, cfg.timeline, clock_offset)
+    # Same union+extend pre-label will do, run here too (still no render, no
+    # API calls) so a tap that will end up outside its own clip -- and so
+    # falls back to a midpoint flip instead of a visible one -- is caught
+    # before committing to the render (2026-09-08, after Sep-06 posting
+    # surfaced this).
+    combined = marks.union_with_audio_detailed(merged, resolved)
+    marks.extend_for_score_flip(combined, cfg.marks)
+    outside = marks.marks_outside_their_clip(combined)
 
     # Clap sync: measured against whatever offset is already applied, so a
     # correctly-corrected run should report ~0 residual.
@@ -1085,6 +1110,14 @@ def cmd_ingest_marks(
     print(f"  {n_fixed} had no nearby audio peak -- fixed-window fallback (this IS the recall gain)")
     if n_gap:
         print(f"  {n_gap} landed in an UNRECORDED GAP between chunks -- marked but not recorded, no clip possible")
+    if outside:
+        print(
+            f"  {len(outside)}/{n_peak} audio-corroborated tap(s) land OUTSIDE their own clip even after "
+            f"extension -- these fall back to a midpoint flip (not the tap) and never visibly change the score:"
+        )
+        for o in outside:
+            where = "before it starts" if o.distance_seconds < 0 else "after it ends"
+            print(f"    seq={o.mark.mark.sequence:>3} {o.mark.mark.category:<10} {abs(o.distance_seconds):.1f}s {where}")
 
     for r in resolved:
         local = r.mark.timestamp.astimezone(marks.RECORDING_TZ)

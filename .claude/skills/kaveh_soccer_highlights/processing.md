@@ -239,6 +239,15 @@ What to read off the output:
 - **Marks in an unrecorded gap.** These were marked while the camera was
   stopped between chunks. They can't be rendered at all; report them as
   "marked but not recorded" rather than letting them vanish.
+- **Taps that land outside their own clip** (added 2026-09-08, after Sep-06
+  posting surfaced a clip whose score never visibly flipped). `ingest-marks`
+  now runs the same union+extend logic pre-label will, purely as a report --
+  no render, no API calls -- and lists any tap still outside its clip's
+  window even after `extend_for_score_flip`. That clip's score falls back to
+  a midpoint flip instead of the tap, which is silent unless you're looking
+  for it. A handful is normal on a real game (slow presses past the cap);
+  a lot of them is worth checking `score_flip_cap_seconds` or the game's
+  press-lag assumptions before running Step 1.
 
 ### Step 1 -- detect candidates + Gemini describe (`pre-label`)
 
@@ -388,6 +397,28 @@ the marks and fills in four `score_*` columns.** Two things to do with that:
   the peak), so a 14s goal clip becomes up to ~21s -- which puts it over the
   ~15s single-run export limit. Expect `seg_render.py` to be the normal path
   for goal clips now, not the exception.
+- **A decrement (Tallies' minus button) is no longer auto-resolved** (see
+  SKILL.md's settled-decisions list) -- every positive press is counted as a
+  real goal by default, so if any presses were corrected with a minus, the
+  printed/derived score is the UPPER bound, not the true final score, until
+  the specific mis-tapped press(es) are identified and removed or the
+  `score_white`/`score_black` columns hand-corrected. **This bit Sep-06**:
+  Kaveh flagged 2 known mis-taps for later identification, but the
+  correction was never actually applied to the sheet before export, so the
+  posted clips showed an inflated black score (12, not the agreed 10). Don't
+  let "I'll figure out which ones later" silently ship as the displayed
+  score -- either get the specific marks to exclude before export, or note
+  clearly in the post that the running counter is provisional.
+- **The score shown in a clip is "as of that clip's start," not the game's
+  final tally** -- if the picked clips don't include one covering the very
+  last goal of the game, no posted clip will ever show the true final
+  score, even with perfectly correct data. Not a bug, just how the flip
+  design works; mention the real final score separately (e.g. in the Step
+  5b raw-footage message) if the picks don't happen to end on the last goal.
+- **A tap that lands outside its own clip** (see Step 0c) makes that clip's
+  score flip at a midpoint instead of visibly at the tap -- `pre-label`
+  prints the same list Step 0c does, worth a glance here too since it now
+  reflects the actual rendered candidates, not a pre-render estimate.
 
 ### Step 1b -- rename candidates into review order (`name-candidates`)
 
@@ -639,6 +670,13 @@ real Farsi, not `?` mojibake -- see Step 2's warning), bot credentials work
 printing Farsi captions to a cp1252 Windows console -- cosmetic only, doesn't
 affect what actually gets sent, but without it you can't read the dry-run output.
 
+**Posted in chronological (game) order automatically, not the order `--clips`
+lists them in** (fixed 2026-09-08, after Sep-06 was posted in rank/score
+order and read confusingly out of game order) -- `telegram-post` sorts by
+the sheet's `start_seconds` internally regardless of how you pass `--clips`.
+Nothing to remember here; just pass whichever clip_files you picked, in any
+order.
+
 **Clips arrive here already carrying the burned-in time of day** -- that
 happens in Step 4's export encode, not here. `telegram-post` is a pure upload
 and should stay one: it never re-encodes, so there's nothing to overlay at this
@@ -662,14 +700,16 @@ clips also keeps any single failure cheap, and the sent-file makes resuming free
 `--review-sheet` here only needs `clip_file`/`gemini_caption` -- point it at the
 **original** `review_sheet.csv`, not an Excel-edited copy (Step 2's warning).
 
-### Step 5b (optional) -- announce where the raw footage lives (`telegram-message`)
+### Step 5b -- announce where the raw footage lives (`telegram-message`)
 
-Kaveh sometimes also uploads the full, unedited game footage to a Google
-Drive folder and wants a short Farsi text message posted to the group
-pointing players at it -- separate from the per-clip highlight posts, and
-not every week. Use `telegram-message` (added 2026-08-31), not
-`telegram-post` -- this is a one-off plain-text `sendMessage`, no video
-attachment:
+**Standard, every game (settled 2026-09-08 -- was "optional/occasional"
+before, now always do this).** Kaveh uploads the full, unedited game
+footage to a Google Drive folder and wants a short Farsi text message
+posted to the group pointing players at it, separate from the per-clip
+highlight posts. Ask him for the Drive folder's share link if you don't
+have it yet -- don't skip this step for not having it, ask. Use
+`telegram-message` (added 2026-08-31), not `telegram-post` -- this is a
+one-off plain-text `sendMessage`, no video attachment:
 
 ```bash
 cd C:/dev/soccer-highlights

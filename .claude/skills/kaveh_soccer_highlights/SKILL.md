@@ -178,22 +178,53 @@ marks) -> posted to a Telegram group with the Farsi caption.
   - **First real-game correction, for calibration**: Sep-06's tally showed
     black 11, but two black-goal taps 6.8s apart with no audio peak near
     either and near-identical Gemini descriptions turned out to be one goal,
-    double-tapped -- corrected to black 10 by hand (one row dropped, every
-    later clip's `score_black` decremented by 1). The Tallies undo button
-    (a `-1` count_change) only cancels its OWN category's most-recently-active
-    press, regardless of how long after -- it does NOT necessarily target
-    the mistake Kaveh remembers making, since something else in that
-    category could have been pressed in between. Don't assume a decrement
-    found late in a review always explains the double-tap it's compared
-    against; check the actual timestamps.
+    double-tapped -- the later tap removed directly from the source CSV
+    (2026-09-08, Kaveh's explicit instruction; the earlier session had
+    instead worked around it downstream, which he considers the wrong fix
+    once a real duplicate is confirmed).
+- **A decrement (Tallies' minus button) is NOT auto-resolved as an undo**
+  (changed 2026-09-07 in `load_tallies_csv`, after Sep-06 showed a decrement
+  landing 2.5 minutes after the press it was meant to cancel, with no
+  guarantee nothing else in that category happened in between -- popping
+  the most-recently-active press is only correct by luck, not by
+  construction). Every positive press is now kept as a real Mark
+  unconditionally; decrements are counted and warned about, not resolved.
+  **This has a real consequence for the printed/derived score: it is now an
+  upper bound, not the true final tally, whenever any decrements exist for
+  that game.** Sep-06 bit this exact way -- Kaveh flagged 2 known mis-taps
+  for identification "during candidate review," but never actually named
+  which marks to exclude before export, so the posted clips showed black's
+  inflated raw count (12) instead of the agreed 10. Getting a decremented
+  game's displayed score right now requires an explicit follow-up: identify
+  the specific mis-tapped mark(s) and either drop them from the source CSV
+  or hand-correct `score_white`/`score_black`, before export -- don't let
+  "I'll figure out which ones later" silently ship as the displayed number.
+- **Taps outside their own clip are now reported, not just discoverable in
+  hindsight** (`marks.marks_outside_their_clip`, added 2026-09-08). A tap
+  that lands outside its owning candidate's rendered window (even after
+  `extend_for_score_flip`) makes that clip's score flip at a midpoint
+  instead of visibly at the tap -- easy to miss until someone notices a
+  clip's score just... changed, with no visible reason. Both `ingest-marks`
+  (pre-render estimate) and `pre-label` (against the actual final
+  candidates) print this list now.
+- **`telegram-post` always sends in chronological (game) order**, regardless
+  of what order `--clips` lists them in (fixed 2026-09-08, after Sep-06
+  posted in review-rank order and read confusingly out of game order).
+  Sorting happens inside the command itself, by the sheet's
+  `start_seconds` -- nothing to remember when picking clips off the ranked
+  sheet, which is naturally NOT chronological order.
+- **Step 5b (the raw-footage Drive-link announcement) is now a standard part
+  of every week's posting, not an occasional extra** (settled 2026-09-08,
+  was previously framed as optional). Ask Kaveh for the Drive share link if
+  you don't have it yet; don't skip the step for not having it.
 - **A game's watch-tagging quirks are worth a dedicated post-export pass, not
   fixed reactively mid-review.** Sep-06 was the first real game with Tallies
   data, and surfaced things worth analyzing properly once the picks are
   locked in and exported: how well the assumed press-lag windows actually
-  held up, whether other double-taps or mis-corrected decrements are hiding
-  in the data, and whether a real "was this one goal or two" auto-correction
-  is worth building from labeled examples. Kaveh's own plan (2026-09-07):
-  come back to this after export, not before.
+  held up, whether other double-taps are hiding in the data, and whether a
+  real "was this one goal or two" auto-correction is worth building from
+  labeled examples. Kaveh's own plan (2026-09-07): come back to this after
+  export, not before.
 - **Recall-first.** Throughout audio tuning and vision work, the standing priority
   is "don't miss real events" over "don't bombard with false positives." A change
   that only cuts precision at the cost of recall is not obviously a net win.

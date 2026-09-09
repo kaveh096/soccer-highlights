@@ -16,6 +16,7 @@ from soccer_highlights.marks import (
     resolve_marks,
     resolve_undos,
     is_near_cam_goal,
+    marks_outside_their_clip,
     review_sort_key,
     review_tier,
     tap_claim,
@@ -608,6 +609,50 @@ def test_extend_for_score_flip_respects_the_cap_on_a_slow_press():
 
     assert extend_for_score_flip(combined, marks_cfg) == 0
     assert combined[0][0].end_seconds == 127.0  # untouched
+
+
+def test_marks_outside_their_clip_flags_a_capped_slow_press():
+    # Same scenario as the cap test above -- the tap at global 145 never
+    # gets pulled inside the clip (ends at 127), so it should be flagged.
+    chunks = [_chunk(1, datetime(2026, 8, 23, 8, 0, 0), duration=1000.0, global_start=0.0)]
+    mark = _goal_mark(1, 8, 2, 25)  # global 145
+    peak = GlobalPeak(time_seconds=122.0, score=1.0)
+    marks_cfg = MarksConfig(score_flip_cap_seconds=10.0, snap_lookback_seconds=30.0)
+    resolved = resolve_marks([mark], chunks, [peak], marks_cfg, TimelineConfig(lookback_seconds=9.0, post_peak_seconds=5.0))
+    audio = [Interval(start_seconds=113.0, end_seconds=127.0, peaks=[peak])]
+    combined = union_with_audio_detailed(audio, resolved)
+    extend_for_score_flip(combined, marks_cfg)
+
+    outside = marks_outside_their_clip(combined)
+
+    assert len(outside) == 1
+    assert outside[0].mark.mark.sequence == 1
+    assert outside[0].distance_seconds == 145.0 - 127.0  # positive: tap lands after the clip ends
+
+
+def test_marks_outside_their_clip_is_empty_when_the_tap_is_covered():
+    # The extend-for-score-flip success case from the earlier test: the tap
+    # ends up inside the (now-extended) clip, so nothing should be flagged.
+    chunks = [_chunk(1, datetime(2026, 8, 23, 8, 0, 0), duration=1000.0, global_start=0.0)]
+    mark = _goal_mark(1, 8, 2, 10)  # global 130, 8s after the peak -- inside the cap
+    peak = GlobalPeak(time_seconds=122.0, score=1.0)
+    marks_cfg = MarksConfig(score_flip_cap_seconds=10.0, score_flip_tail_seconds=2.0)
+    resolved = resolve_marks([mark], chunks, [peak], marks_cfg, TimelineConfig(lookback_seconds=9.0, post_peak_seconds=5.0))
+    audio = [Interval(start_seconds=113.0, end_seconds=127.0, peaks=[peak])]
+    combined = union_with_audio_detailed(audio, resolved)
+    extend_for_score_flip(combined, marks_cfg)
+
+    assert marks_outside_their_clip(combined) == []
+
+
+def test_marks_outside_their_clip_ignores_fixed_window_marks():
+    # A fixed_window mark's own tap is inside its window by construction --
+    # never flagged, even with no audio at all.
+    chunks = [_chunk(1, datetime(2026, 8, 23, 8, 0, 0), duration=1000.0, global_start=0.0)]
+    resolved = resolve_marks([_goal_mark(1, 8, 2, 10)], chunks, [], MarksConfig(), TimelineConfig())
+    combined = union_with_audio_detailed([], resolved)
+
+    assert marks_outside_their_clip(combined) == []
 
 
 def test_extend_for_score_flip_leaves_fixed_window_clips_alone():

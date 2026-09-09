@@ -362,6 +362,43 @@ def extend_for_score_flip(
     return extended
 
 
+@dataclass
+class OutsideClipMark:
+    """A mark whose own tap timestamp falls outside its owning candidate's
+    rendered window (even after `extend_for_score_flip`)."""
+
+    mark: ResolvedMark
+    distance_seconds: float  # signed: negative = tap before the clip starts, positive = after it ends
+
+
+def marks_outside_their_clip(
+    combined: list[tuple[Interval, str, ResolvedMark | None]],
+) -> list[OutsideClipMark]:
+    """Marks whose own tap lands outside their owning candidate's final
+    rendered window (2026-09-08, after Sep-06 posting surfaced clips whose
+    burned-in score never visibly flipped and fell back to the midpoint).
+
+    Call this AFTER `extend_for_score_flip` -- a `both` row's window may
+    have just been stretched to cover its own tap, and this check needs to
+    see that final window, not the pre-extension one. A `fixed_window` mark
+    can never appear here: its window is constructed as [tap - lookback,
+    tap + lookahead], so its own tap is inside it by definition. Only
+    `both` rows (audio-anchored, extended only up to `score_flip_cap_seconds`)
+    can end up with their tap still outside -- exactly the case
+    `score_for_interval` falls back to a midpoint flip for, so this is a
+    direct, checkable count of how often that fallback is triggered, ahead
+    of the render."""
+    results: list[OutsideClipMark] = []
+    for interval, _source, owner in combined:
+        if owner is None or owner.global_seconds is None:
+            continue
+        if owner.global_seconds < interval.start_seconds:
+            results.append(OutsideClipMark(owner, owner.global_seconds - interval.start_seconds))
+        elif owner.global_seconds > interval.end_seconds:
+            results.append(OutsideClipMark(owner, owner.global_seconds - interval.end_seconds))
+    return results
+
+
 def union_with_audio(
     audio_intervals: list[Interval], resolved: list[ResolvedMark]
 ) -> tuple[list[Interval], list[str]]:
