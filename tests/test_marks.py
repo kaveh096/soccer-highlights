@@ -111,10 +111,11 @@ def test_load_tallies_csv_parses_the_real_bench_test_export(tmp_path):
         encoding="utf-8",
     )
 
-    marks = load_tallies_csv(csv_path, "white_goal")
+    marks, n_decrements = load_tallies_csv(csv_path, "white_goal")
 
     # Decrements are NOT auto-resolved (2026-09-07) -- every positive press
     # survives as a Mark regardless of any -1 rows around it.
+    assert n_decrements == 3
     assert [m.category for m in marks] == ["white_goal"] * 5
     assert [m.timestamp.timestamp() for m in marks] == [
         1788407495354 / 1000,
@@ -135,7 +136,9 @@ def test_load_tallies_csv_ignores_non_click_rows(tmp_path):
         encoding="utf-8",
     )
 
-    assert len(load_tallies_csv(csv_path, "black_goal")) == 1
+    marks, n_decrements = load_tallies_csv(csv_path, "black_goal")
+    assert len(marks) == 1
+    assert n_decrements == 0
 
 
 def test_load_tallies_csv_decrements_are_not_auto_resolved(tmp_path, capsys):
@@ -147,9 +150,10 @@ def test_load_tallies_csv_decrements_are_not_auto_resolved(tmp_path, capsys):
         "timestamp,count,count_change,action\n1788407400000,1,1,CLICK\n1788407600000,0,-1,CLICK\n", encoding="utf-8"
     )
 
-    marks = load_tallies_csv(white, "white_goal")
+    marks, n_decrements = load_tallies_csv(white, "white_goal")
 
     assert [m.category for m in marks] == ["white_goal"]  # the +1 survives despite the later -1
+    assert n_decrements == 1
     assert "1 decrement(s)" in capsys.readouterr().out
 
 
@@ -159,7 +163,9 @@ def test_merge_tally_marks_orders_by_timestamp_across_files_and_numbers_sequence
     black = tmp_path / "black.csv"
     black.write_text("timestamp,count,count_change,action\n1788407400000,1,1,CLICK\n", encoding="utf-8")
 
-    merged = merge_tally_marks(load_tallies_csv(white, "white_goal") + load_tallies_csv(black, "black_goal"))
+    white_marks, _ = load_tallies_csv(white, "white_goal")
+    black_marks, _ = load_tallies_csv(black, "black_goal")
+    merged = merge_tally_marks(white_marks + black_marks)
 
     assert [(m.sequence, m.category) for m in merged] == [(1, "black_goal"), (2, "white_goal")]
 

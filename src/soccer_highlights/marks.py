@@ -89,7 +89,7 @@ def load_marks_csv(path: str | Path) -> list[Mark]:
     return marks
 
 
-def load_tallies_csv(path: str | Path, category: str) -> list[Mark]:
+def load_tallies_csv(path: str | Path, category: str) -> tuple[list[Mark], int]:
     """Parse one CSV exported by the Tallies Wear OS app into Marks.
 
     Verified against a real export (2026-09-02 bench test). Tallies writes
@@ -120,7 +120,12 @@ def load_tallies_csv(path: str | Path, category: str) -> list[Mark]:
     keep every positive press as a real Mark unconditionally, and identify
     the actual mis-taps by hand during candidate review, against real
     footage, rather than have this module guess. Decrement rows are
-    counted and warned about, not silently dropped without a trace."""
+    counted and warned about, not silently dropped without a trace --
+    the count is also returned (not just printed), so a caller can turn it
+    into a durable, hard-to-miss gate instead of a console line that's easy
+    to read past (2026-09-08, after Sep-06's decrements were flagged in the
+    log but the follow-up correction never actually got applied before
+    posting -- see cmd_pre_label's DECREMENTS_PENDING.txt)."""
     path = Path(path)
     if category not in CATEGORIES:
         raise ValueError(f"Unknown category {category!r} (expected one of {sorted(CATEGORIES)})")
@@ -158,7 +163,7 @@ def load_tallies_csv(path: str | Path, category: str) -> list[Mark]:
             f"WARNING: {path.name} contains an EDIT_TALLY row -- the counter total was manually edited, so it "
             "cannot be cross-checked against the number of press rows (the presses themselves are still fine)."
         )
-    return active
+    return active, n_decrements
 
 
 def merge_tally_marks(per_category: list[Mark]) -> list[Mark]:

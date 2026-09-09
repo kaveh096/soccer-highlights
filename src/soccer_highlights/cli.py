@@ -734,8 +734,9 @@ def cmd_pre_label(
     is_sync_claps = [False] * len(merged)
     is_near_cam_goals: list[bool | None] = [None] * len(merged)
     score_columns: list[marks.ScoreColumns] | None = None
+    pending_decrements: list[tuple[str, int]] = []
     if marks_csv or tally_csvs:
-        active_marks, _undone, source_label = _load_marks(marks_csv, tally_csvs)
+        active_marks, _undone, source_label, pending_decrements = _load_marks(marks_csv, tally_csvs)
         audio_peaks = [p for interval in merged for p in interval.peaks]
         resolved = marks.resolve_marks(active_marks, chunks, audio_peaks, cfg.marks, cfg.timeline, clock_offset)
         n_gap = sum(1 for r in resolved if r.anchor == "unrecorded_gap")
@@ -813,6 +814,31 @@ def cmd_pre_label(
     strategy_dir = Path(out_dir) / "candidates"
     strategy_dir.mkdir(parents=True, exist_ok=True)
     write_events_json(merged, strategy_dir / "events.json")
+
+    # A durable, hard-to-miss gate -- a console warning alone wasn't enough
+    # (2026-09-08: Sep-06's decrements were printed but the follow-up
+    # correction never got applied before export/posting). Self-clearing:
+    # a rerun with nothing pending removes a stale marker automatically.
+    decrements_marker = strategy_dir / "DECREMENTS_PENDING.txt"
+    if pending_decrements:
+        lines = [
+            "Unresolved Tallies decrement(s) -- every positive press was kept as a real Mark, so the",
+            "derived score is an UPPER BOUND, not the true final tally, until these are resolved.",
+            "",
+            "STOP before Step 3/4 (picking/exporting): ask Kaveh which specific press(es) each decrement",
+            "was meant to cancel, then either remove that press from the source tally CSV (Raw\\) and",
+            "re-run pre-label, or hand-correct score_white/score_black in review_sheet.csv for every",
+            "affected row. Delete this file once resolved -- it is not auto-cleared on its own.",
+            "",
+        ] + [f"  {category}: {count} decrement(s)" for category, count in pending_decrements]
+        decrements_marker.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        print(
+            f"\n*** {decrements_marker} written -- "
+            f"{sum(c for _, c in pending_decrements)} unresolved decrement(s). STOP and ask Kaveh which "
+            "press(es) they cancel before Step 3/4. ***"
+        )
+    elif decrements_marker.exists():
+        decrements_marker.unlink()
 
     # Shared spec (cfg.review) -- the same clip a human labels here is the
     # exact file Gemini scores and, later, label-audit re-checks against.
@@ -1033,27 +1059,36 @@ def cmd_name_candidates(cfg: Config, candidates_dir: str, revert: bool = False) 
             print(f"  ... {len(rows) - 10} more")
 
 
-def _load_marks(marks_csv: str | None, tally_csvs: list[str] | None) -> tuple[list[marks.Mark], int, str]:
+def _load_marks(
+    marks_csv: str | None, tally_csvs: list[str] | None
+) -> tuple[list[marks.Mark], int, str, list[tuple[str, int]]]:
     """Load marks from either the generic marks CSV or one-or-more Tallies
-    per-counter exports, returning (active_marks, undone_count, source_label)."""
+    per-counter exports, returning (active_marks, undone_count, source_label,
+    pending_decrements) -- the last is a (category, count) list, empty
+    unless a Tallies counter had a decrement that wasn't auto-resolved (see
+    load_tallies_csv), for the caller to turn into a hard-to-miss gate
+    rather than something only visible in that one run's console output."""
     if tally_csvs:
         per_category: list[marks.Mark] = []
-        raw_total = 0
+        pending_decrements: list[tuple[str, int]] = []
         for spec in tally_csvs:
             if "=" not in spec:
                 raise SystemExit(f"--tally-csv expects CATEGORY=PATH, got {spec!r}")
             category, _, path = spec.partition("=")
-            loaded = marks.load_tallies_csv(path, category.strip())
-            raw_total += len(loaded)
+            category = category.strip()
+            loaded, n_decrements = marks.load_tallies_csv(path, category)
             per_category.extend(loaded)
+            if n_decrements:
+                pending_decrements.append((category, n_decrements))
         active = marks.merge_tally_marks(per_category)
-        # Tallies' minus button is resolved per-counter inside
-        # load_tallies_csv, so nothing is left for the global stack to undo.
-        return active, 0, ", ".join(s.split("=", 1)[1] for s in tally_csvs)
+        # Every positive press is kept unconditionally now (2026-09-07) --
+        # nothing is auto-resolved, so there's nothing for the global stack
+        # to undo either; pending_decrements carries what's still unresolved.
+        return active, 0, ", ".join(s.split("=", 1)[1] for s in tally_csvs), pending_decrements
 
     raw_marks = marks.load_marks_csv(marks_csv)
     active = marks.resolve_undos(raw_marks)
-    return active, len(raw_marks) - len(active), str(marks_csv)
+    return active, len(raw_marks) - len(active), str(marks_csv), []
 
 
 def cmd_ingest_marks(
@@ -1065,7 +1100,7 @@ def cmd_ingest_marks(
     clock_offset: float,
 ) -> None:
     chunks = discover_chunks(cfg.input.source_dir)
-    active_marks, undone, source_label = _load_marks(marks_csv, tally_csvs)
+    active_marks, undone, source_label, pending_decrements = _load_marks(marks_csv, tally_csvs)
 
     merged, _traces = _run_detection(cfg, chunks)
     audio_peaks = [p for interval in merged for p in interval.peaks]
@@ -1134,6 +1169,14 @@ def cmd_ingest_marks(
     print(f"\nWatch tally: white {white} - black {black}")
     if final_score:
         print(f"Confirm final score was {final_score} -- a mismatch means presses were missed or mis-tapped.")
+    if pending_decrements:
+        total = sum(c for _, c in pending_decrements)
+        detail = ", ".join(f"{category}: {count}" for category, count in pending_decrements)
+        print(
+            f"\n*** {total} unresolved decrement(s) ({detail}) -- every positive press is kept as a real Mark, "
+            "so this tally is an UPPER BOUND, not necessarily the true score. Ask Kaveh which press(es) each "
+            "decrement was meant to cancel before trusting it in Step 1/3/4. ***"
+        )
 
     if out:
         out_path = Path(out)

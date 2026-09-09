@@ -199,6 +199,13 @@ marks) -> posted to a Telegram group with the Farsi caption.
   the specific mis-tapped mark(s) and either drop them from the source CSV
   or hand-correct `score_white`/`score_black`, before export -- don't let
   "I'll figure out which ones later" silently ship as the displayed number.
+  **A console warning alone wasn't enough** (that's exactly what Sep-06 had,
+  and it still got missed) -- as of 2026-09-08, `pre-label` also writes
+  `candidates/DECREMENTS_PENDING.txt` (self-clearing on a rerun with
+  nothing pending) whenever this applies, and `ingest-marks` prints the
+  same `***`-bracketed summary before any render. Treat that file's
+  existence as a hard stop: ask Kaveh which press(es) each decrement cancels
+  before Step 3/4, every time, don't just read past the console line.
 - **Taps outside their own clip are now reported, not just discoverable in
   hindsight** (`marks.marks_outside_their_clip`, added 2026-09-08). A tap
   that lands outside its owning candidate's rendered window (even after

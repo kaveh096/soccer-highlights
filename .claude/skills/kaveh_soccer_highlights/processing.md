@@ -405,10 +405,18 @@ the marks and fills in four `score_*` columns.** Two things to do with that:
   `score_white`/`score_black` columns hand-corrected. **This bit Sep-06**:
   Kaveh flagged 2 known mis-taps for later identification, but the
   correction was never actually applied to the sheet before export, so the
-  posted clips showed an inflated black score (12, not the agreed 10). Don't
-  let "I'll figure out which ones later" silently ship as the displayed
-  score -- either get the specific marks to exclude before export, or note
-  clearly in the post that the running counter is provisional.
+  posted clips showed an inflated black score (12, not the agreed 10).
+  **Fixed 2026-09-08, don't rely on remembering this**: whenever any
+  category has unresolved decrements, `pre-label` now writes
+  `candidates/DECREMENTS_PENDING.txt` and prints a `***`-bracketed warning
+  naming the count per category. **Treat this file's existence as a hard
+  stop**: before Step 3/4, ask Kaveh directly which specific press(es) each
+  decrement was meant to cancel, then either drop that press from the
+  source tally CSV and re-run `pre-label` (the marker clears itself on a
+  clean rerun), or hand-correct `score_white`/`score_black` for every
+  affected row and delete the file. `ingest-marks` prints the same
+  `***`-bracketed summary at Step 0c, before any render -- don't wait until
+  Step 1 to notice.
 - **The score shown in a clip is "as of that clip's start," not the game's
   final tally** -- if the picked clips don't include one covering the very
   last goal of the game, no posted clip will ever show the true final
