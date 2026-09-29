@@ -21,13 +21,16 @@ prior sessions.
   Gemini scoring prompt (more likely to need revisiting as new games surface new
   edge cases).
 
-**`scripts/`** holds three promoted, reusable helpers. Know which is which:
+**`scripts/`** holds four promoted, reusable helpers. Know which is which:
 - `sweep_prompt.py` / `analyze_sweep.py` -- **eval only** (evals.md Part B). Run
   one Gemini describe profile over a labeled sheet, then compare profiles by
   P/R/F1. Not part of a normal weekly run.
 - `seg_render.py` -- **weekly workflow** (processing.md Step 4). Exports one
   share-quality clip in resumable segments, for clips too long to finish in a
   single run on this laptop. Reach for it whenever a pick is longer than ~15s.
+- `timelapse_render.py` -- **optional, only on request** (processing.md Step 6).
+  Speeds the whole game down to a short clip with the scoreboard/clock burned
+  in. Not part of the normal weekly flow -- only run it if Kaveh asks.
 
 ## The one-sentence pipeline
 

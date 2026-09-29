@@ -141,8 +141,13 @@ def load_tallies_csv(path: str | Path, category: str) -> tuple[list[Mark], int]:
                 continue
             if action != "CLICK":
                 continue
-            change = int(row["count_change"])
-            timestamp = datetime.fromtimestamp(int(row["timestamp"]) / 1000, tz=UTC)
+            # Tallies sometimes exports timestamp/count_change with
+            # locale thousands-separators (e.g. "1,790,529,761,521"),
+            # quoted because of the embedded commas -- seen 2026-09-27
+            # on one of three files from the same export, the other two
+            # plain. Strip commas before int() either way.
+            change = int(row["count_change"].replace(",", ""))
+            timestamp = datetime.fromtimestamp(int(row["timestamp"].replace(",", "")) / 1000, tz=UTC)
             if change > 0:
                 # |change| > 1 at a single instant can't be split into
                 # separate press times, so it collapses to one mark.

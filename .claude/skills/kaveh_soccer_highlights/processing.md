@@ -740,6 +740,34 @@ fixed script):
 <Google Drive folder link>
 ```
 
+### Step 6 (optional) -- whole-game timelapse (`timelapse_render.py`)
+
+**Not part of the normal weekly flow -- only do this if Kaveh explicitly asks for a timelapse.** Added 2026-09-29 after a 25-minute single-chunk prototype landed well ("fun", "one funny clip to share"). Speeds the ENTIRE game's recorded footage (every chunk, back to back) down to a short clip (Kaveh's first full-game ask: 40s), with the real scoreboard/clock burned in and a real-speed audio snippet laid under it, sized to fit Telegram's 50MB cap.
+
+```bash
+export PATH="/c/Users/Kaveh/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-8.1.2-full_build/bin:$PATH"
+cd C:/dev/soccer-highlights
+./.venv/Scripts/python.exe .claude/skills/kaveh_soccer_highlights/scripts/timelapse_render.py \
+  --source-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Raw" \
+  --tally-csv "white_goal=G:/.../<date>/Raw/tally_white_goal.csv" \
+  --tally-csv "black_goal=G:/.../<date>/Raw/tally_black_goal.csv" \
+  --clock-offset-seconds <from Step 0c, usually omit> \
+  --out-dir "C:/local/scratch/timelapse_<date>" \
+  --out-duration-seconds 40
+```
+
+**Always sources from the `.LRF` proxy, never the 4K masters.** A literal speed-up needs to fully decode every source frame before `setpts`/`fps` can discard most of them -- there's no way around that cost regardless of hardware. At the 4K masters' established ~20x-realtime decode floor, a full ~82-minute game would take **over a day**; the `.LRF` proxy ran close to 1x realtime on the chunk-1 prototype (1493s of source in ~1500s wall time), putting a full game at roughly 80-90 minutes instead. Since the final output is also compressed to fit 50MB at ~40s (~10Mbps) and blurred by a 100x+ speedup either way, there is no visible quality argument for paying the 4K cost -- don't second-guess this without a real reason tied to a specific game.
+
+**Design, for when this needs revisiting**: draws the scoreboard/clock against REAL time first (reusing `render.py`'s existing per-clip drawtext building blocks almost verbatim -- `_drawtext_score_stage`, `_drawtext_clock_stage`, `scoreboard.chrome_png`), THEN applies `setpts`/`fps` as the LAST stage of the filter graph to compress time. This means the already-correctness-tested score-flip and clock logic never has to know a speedup is coming -- it draws at real speed exactly like a normal export, and `setpts` squeezes the correct frames down afterward. The one real extension over the existing code is `_score_segments`, which generalizes `render._score_filters` (built for a single candidate clip, so it only ever handles 0-1 goals) to the several real goals a whole ~25-minute chunk contains -- it walks `marks.score_events()`'s sorted (time, team) list into contiguous (start, end, white, black) windows per chunk.
+
+**Two-phase, deliberately resumable like `seg_render.py`**: phase 1 (per-chunk decode+overlay+speed-compress) is the expensive ~80-90 minute part, and renders one file per chunk with an `is_playable` skip-if-exists check -- that cost must never be paid twice on this laptop's history of sleep/terminal-closure interruptions. Phase 2 (concat the now-tiny per-chunk pieces, mux in a real-speed audio snippet, pick a final CRF to land under 50MB) operates on an already-short master, so it's cheap to re-run repeatedly while tuning size -- rerun with just `--final-crf` bumped (no need to redo phase 1) if the first pass comes out over the cap.
+
+**Verify with sampled frames before trusting it, not just `ffprobe`.** The scoreboard/clock math here is a genuine extension of tested code, not a reuse of an already-verified path -- pull several frames at random/spread-out timestamps (`ffmpeg -ss <t> -i timelapse_final.mp4 -frames:v 1 out.png`) and eyeball that the score and clock actually look right (score only goes up, never resets; clock generally moves forward through the compressed timeline, jumping at halftime rather than running backward) before calling it done or posting it.
+
+**Audio** is one continuous real-speed snippet (not per-goal synced bursts) from a lively stretch of play, picked via `--audio-start-seconds` (a global game-second) -- pick something worth hearing (e.g. the moments around a clean near-cam goal), don't rely on the default heuristic without checking it lands somewhere good.
+
+**Posting**: not part of `telegram-post`'s sheet-driven flow (it isn't a `review_sheet.csv` row) -- send it as a separate `telegram-post`/`sendVideo`-equivalent call with its own short Farsi caption, after the regular picked clips.
+
 ---
 
 ## Known gotchas, quick index
