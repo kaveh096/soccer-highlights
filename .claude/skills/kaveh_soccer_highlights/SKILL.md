@@ -155,10 +155,13 @@ marks) -> posted to a Telegram group with the Farsi caption.
   2/5, invisible under the old score-only ranking, surfaced near the top
   once the tap alone was trusted).
   - **`--near-cam-team-first-half {white,black}`** (`pre-label`) is the
-    per-game camera input this needs -- which team's goal the camera sits
-    behind in the FIRST half, swapping automatically at the auto-detected
-    halftime boundary (`discovery.detect_halftime_seconds`, the single
-    largest inter-chunk recording gap). Omit it and goal-tapped clips fall
+    per-game camera input this needs -- which team's SHOTS the camera
+    captures in the FIRST half (the attacking team, i.e. the OPPOSITE of the
+    team whose own goal the camera is behind: behind white's goal -> pass
+    `black`), swapping automatically at the auto-detected halftime boundary
+    (`discovery.detect_halftime_seconds`, the single largest inter-chunk
+    recording gap). Giving it the goal-owner inverts the tiering (hit
+    2026-10-04; see processing.md's gotchas index). Omit it and goal-tapped clips fall
     back to `goal_this_end`, same as before 2026-09-07 -- forgetting this
     input degrades gracefully, it doesn't break the run.
   - **Same-category fixed-window marks that are close enough to overlap now

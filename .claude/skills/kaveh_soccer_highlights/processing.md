@@ -266,12 +266,18 @@ cd C:/dev/soccer-highlights
   [--near-cam-team-first-half {white,black}]
 ```
 
-**`--near-cam-team-first-half`** (added 2026-09-07): which team's goal the
-camera sits behind in the FIRST half -- ask Kaveh every game, it's not
-derivable from the footage. Drives review order's near-field-goal tier
+**`--near-cam-team-first-half`** (added 2026-09-07): which team's SHOTS the
+camera captures in the FIRST half, i.e. the **attacking** team -- the
+opposite of the team whose own goal the camera is behind (camera behind
+white's goal -> pass `black`). Ask Kaveh every game, it's not derivable from
+the footage, and phrase the question as "whose shots does the camera see",
+not "whose goal is it behind". Drives review order's near-field-goal tier
 ahead of Gemini's `goal_this_end` for any genuine goal tap (see SKILL.md's
 settled-decisions list). Halftime is auto-detected from the recording gap;
 omitting the flag just falls back to `goal_this_end`, not a broken run.
+Passing the goal-owner instead inverts the tiering (hit 2026-10-04).
+Sanity check after Step 1/1b: tier-1 goal clips' Gemini descriptions should
+read as near-goal; if they say "far end", the flag is inverted.
 
 **Pass the same `--tally-csv` flags here that Step 0c used.** They union the
 watch marks with the audio candidates, so a goal the watch caught but audio
@@ -445,6 +451,10 @@ Renames `clip_002.mp4` -> `r01_s4_746a_c002.mp4`: **r**eview rank, gemini
 **s**core, wall-clock time, and the canonical **c**lip id. The point is that the
 folder's default A-Z sort becomes the review order (best first, chronological
 within a score band) instead of burying the good clips among the 2s.
+
+Sanity check the ranking before trusting it: tier-1 goal clips' Gemini
+descriptions should read as near-goal; if they say "far end", the
+`--near-cam-team-first-half` flag was given the wrong team (see Step 1).
 
 **On a watch-tagged sheet, rank is tiered, not just score-sorted** (revised
 2026-09-07, `marks.review_tier`): tier 1 is a genuine goal tap
@@ -799,4 +809,5 @@ cd C:/dev/soccer-highlights
 | A detached `pre-label` process looks dead (`Get-Process -Id <launcher_pid>` shows 0% CPU or nothing) but the log is still growing | The venv `python.exe` launcher PID is a stub; the real work runs in a CHILD process with a different PID | Check `Get-CimInstance Win32_Process \| Where-Object {$_.Name -eq 'python.exe'}` for the real worker, or just compare the log/cache file's `LastWriteTime` to now -- recent write means alive, full stop |
 | A PowerShell `Where-Object {$_.CommandLine -match ...}` filter via the Bash tool's nested `-Command` string returns empty even though the process is alive | Backslash-escaping `\$_` inside the Bash tool's double-quoted `-Command` string breaks the filter silently | Don't escape `$_`; if it still misbehaves, skip the filter and just check `LastWriteTime` |
 | Full 5-chunk audio decode gets OOM-killed | This laptop has only 8GB RAM, and other concurrent work (browser, other Claude sessions, other scripts) eats into the ~4GB typically free | Don't re-run `_run_detection`/`extract_audio_samples` just to recompute categories/provenance -- reconstruct from `events.json`'s cached peaks instead (no decode), cross-checking against the sheet's real `source` column before trusting it |
+| Near-cam goal tiering looks inverted (far-end goals ranked first, tier-1 descriptions say "far end") | `--near-cam-team-first-half` was given the team whose goal the camera is behind; it takes the team whose shots the camera captures (the attacker) | Re-run `pre-label` with the attacking team, or recover without re-describing: `name-candidates --revert`, flip `is_near_cam_goal` True/False on the goal-tap rows of `review_sheet.csv`, then `name-candidates` again (hit 2026-10-04) |
 | MP4s won't fit on Drive/local disk for a same-day game | Full-res chunks are ~17GB each | Point `--source-dir` straight at the memory card (e.g. `D:/DCIM/DJI_001`) instead of copying to Drive -- copy just the small `.LRF` proxies there too (`robocopy ... *.LRF`) so `discover_chunks` finds matching pairs; keep `--out-dir`/tally CSV paths on Drive as usual. Card reads are local, not subject to the Google-Drive-path slowness this skill otherwise warns about |

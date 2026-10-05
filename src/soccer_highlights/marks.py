@@ -542,6 +542,13 @@ def is_near_cam_goal(
     consulting `goal_this_end` at all once a goal-category mark and a
     complete camera config are both available.
 
+    `near_cam_team_first_half` is the team whose SHOTS the camera captures
+    in the first half (the attacker), i.e. the team NOT defending the goal
+    the camera is behind -- in the Sep-06 quote that is "white", not
+    "black". A goal is near-cam when the scoring team equals that team
+    (swapped after halftime). Passing the team whose own goal the camera
+    is behind inverts every result (seen 2026-10-04).
+
     Returns False whenever the per-game input is incomplete (no halftime
     boundary detected, or `near_cam_team_first_half` not given) -- the
     caller is expected to treat that as "no info" (fall back to

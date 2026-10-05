@@ -707,8 +707,9 @@ def cmd_pre_label(
     must degrade gracefully, never break the weekly run.
 
     With --near-cam-team-first-half {white,black}: the per-game camera
-    setup (which team's goal the camera sits behind in the first half,
-    swapping after halftime) drives review order's near-field-goal check
+    setup (which team's SHOTS the camera captures in the first half, i.e.
+    the attacking team -- NOT the team whose own goal the camera sits
+    behind; swapping after halftime) drives review order's near-field-goal check
     (marks.is_near_cam_goal) instead of Gemini's goal_this_end for any
     genuine goal tap -- see marks.review_tier. Halftime is auto-detected as
     the single largest inter-chunk recording gap
@@ -1359,8 +1360,9 @@ def main() -> None:
         "--near-cam-team-first-half",
         default=None,
         choices=["white", "black"],
-        help="Which team's goal the camera sits behind in the FIRST half (swaps automatically after the "
-        "auto-detected halftime gap). Drives review order's near-field-goal check ahead of Gemini's "
+        help="Which team's SHOTS the camera captures in the FIRST half, i.e. the attacking team -- the "
+        "OPPOSITE of the team whose own goal the camera is behind (camera behind white's goal -> pass black). "
+        "Swaps automatically after the auto-detected halftime gap. Drives review order's near-field-goal check ahead of Gemini's "
         "goal_this_end for any genuine goal tap. Omit to fall back to goal_this_end, same as before 2026-09-07",
     )
 
