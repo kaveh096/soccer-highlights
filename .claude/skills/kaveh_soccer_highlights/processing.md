@@ -140,8 +140,9 @@ defaults still point at old repo-relative paths that no longer exist.
 ## Part 3: The recurring weekly workflow
 
 **Two modes -- most weeks are "quick share," not "full eval."** Steps 0/1/1b
-(detect + render + Gemini describe/score, rename) are always run the same
-way. Steps 2/3 (deciding the final picks) branch:
+(detect + render + Gemini describe/score, rename), plus Step 1c's
+tap-vs-Gemini check on a watch-tagged game, are always run the same way.
+Steps 2/3 (deciding the final picks) branch:
 
 - **Quick share (the common case)**: Kaveh watches clips soon after the game
   to post highlights fast. He picks `clip_file`s to export/post directly off
@@ -201,6 +202,14 @@ ignores everything else in the folder.
 **If the tallies are missing**, say so plainly and carry on -- everything below
 degrades to audio-only exactly as before. Don't silently skip the `--tally-csv`
 flags and let a `source`-less sheet imply the watch simply found nothing.
+
+**Don't swap in a re-exported tally CSV without diffing it.** Tallies can
+record a decrement differently on a second export: on 2026-10-04 the first
+`moment` export logged the minus press as `count_change` +1 with a lower
+`count`, the re-export as -1. If Kaveh wants that press kept as a moment, keep
+the ORIGINAL file in `Raw\` -- `load_tallies_csv` keys on the sign of
+`count_change`, so the re-export turns that press into an unresolved
+decrement (`DECREMENTS_PENDING.txt`) and it stops being a mark.
 
 ### Step 0c -- measure the clap-sync offset (`ingest-marks`)
 
@@ -330,6 +339,24 @@ clip after credits are fixed, it's cheaper to call
 `label_audit.generate_description` directly on the already-rendered clip
 and patch `descriptions_cache.json` + `review_sheet.csv` by hand than to
 redo a full render pass for one clip (done this way 2026-09-06).
+
+**Gemini "The read operation timed out" is a different failure: the 60s
+`gemini.request_timeout_seconds` default is too short for fps=10 video
+uploads.** Hit 2026-10-04: 20/61 describe calls failed this way; 17 recovered
+at 240s, the last 3 at 420s. Raise it for the run without editing config --
+the env override reaches `pre-label`'s describe calls (verified 2026-10-05):
+`SOCCER_HL__GEMINI__REQUEST_TIMEOUT_SECONDS=420` (Bash prefix, or
+`$env:SOCCER_HL__GEMINI__REQUEST_TIMEOUT_SECONDS = "420"` before a PowerShell
+`Start-Process`). If the renders are already done and only describes failed,
+don't re-run `pre-label` (it redoes the whole render pass): a scratch script
+that loads the config with the higher timeout and calls
+`label_audit.run_describe_only` over the sheet's rows, in sheet order with
+`tap_context=marks.tap_claim(mark_category)`, retries only the `null`
+entries -- the cache is position-keyed, so the `LabeledRow`s must match the
+cache's order, `strategy` and `clip_file` exactly (it raises on a mismatch).
+`run_describe_only` doesn't touch the sheet: patch the `gemini_score`/
+`goal_this_end`/`gemini_caption`/`gemini_description` columns of
+`review_sheet.csv` from the cache before Step 1b.
 
 **Checking `descriptions_cache.json` success count: use the nested `describe`
 field, not list-entry truthiness.** Each entry is always a dict (`{strategy,
@@ -484,6 +511,148 @@ plain score-desc sort, unchanged.
 - Renaming after posting would break `.telegram_sent.json`'s double-post
   protection (it keys on `clip_file`). Order is always rename -> export -> post.
 
+### Step 1c -- tap-vs-Gemini check (do this before ranking is trusted)
+
+**Every watch-tagged game, after `pre-label`, before Step 3 picks.** The
+ranking trusts taps over Gemini (SKILL.md's settled decisions), and that is
+right about *whether* a goal happened -- but a tap can be right about "a goal
+happened" and wrong about "when". The clip window is built around the tap (15s
+fixed-window lookback, or the nearest audio peak), so a late tap produces a
+clip that starts after the ball is already in the net, and nothing in the
+ranking flags it.
+
+Hit 2026-10-04: Kaveh was swapping goalkeeper gloves for the first goals and
+tapped ~22s late. `c011` (`source=mark`, `black_goal`) scored 2 and described
+routine midfield play; `c012` (`source=both`, `white_goal`) scored 1 and
+described the goalkeeper taking off his gloves. The real goal was ~22s before
+the tap; the clip started 8s after it.
+
+**The rule:** every row with a genuine goal tap (`mark_category` in
+`white_goal`/`black_goal`, i.e. `source` `mark` or `both`) whose
+`gemini_score` < 3, or whose `gemini_description` doesn't describe a goal /
+ball in the net, is a probable "tap fell outside the actual goal clip" case.
+It is a mandatory look, not a drop. Recovery, cheapest first:
+
+1. **Watch the clip and its neighbouring candidates.** The true goal is
+   usually just before the clip; tier/score ordering will have buried it, so
+   look up the rows with the next-earlier `start_seconds` in the sheet, not
+   the next rank.
+2. **Shift the window earlier / extend it.** Add a row to the derived
+   `post_sheet.csv` (Step 4b -- never hand-edit `review_sheet.csv`) with an
+   earlier `start_seconds`, keeping `end_seconds` past the tap so the score
+   still flips at the tap -- and recompute `score_flip_seconds` (tap global
+   second minus the new `start_seconds`), since it is an offset into the
+   clip.
+3. **Merge adjacent candidates** via `post_sheet.csv` (Step 4b) when the goal
+   is split across two clips.
+4. **The goal isn't in any existing clip** (audio missed it too) -> Step 1d.
+
+**Cross-check with tally arithmetic.** If the white+black tap counts match the
+real final score (Oct-04: 7-9, they did), then a clip that looks like a goal
+but has no tap, or a tap with no goal anywhere near it, almost always means a
+mis-timed tap, not an extra or missing goal. Read the disagreement by
+direction:
+
+| Disagreement | Suspect first |
+|---|---|
+| Tapped goal clip, low score / no goal described | The clip window (late tap) -- this step |
+| High-score goal-looking clip, no tap | Gemini (it called crossbar/post shots goals on Oct-04, and captioned untapped clips as goals), or a late tap whose clip merged into a later one |
+
+Gemini can't be trusted either way near a tap boundary: the same clip can be
+underscored because the goal is outside it, or overscored because of
+celebration audio from a goal just before it.
+
+### Step 1d -- goal-search recovery (when 1c finds a goal that no clip contains)
+
+`scripts/goal_search.py` scans a stretch of raw footage with Gemini for every
+ball-in-goal moment, independent of audio and tap windows. Use it only when
+Step 1c has a tapped goal that no existing clip shows. Found the missing first
+black goal on 2026-10-04 (global ~607 = 09:57:08; the tap was at 629.9).
+
+**Pick the range from the taps.** A tap always comes AFTER its goal: scan from
+the previous goal's tap (or kickoff) to a little past the suspect tap. Global
+seconds are the review sheet's `start_seconds` axis.
+
+```bash
+export PATH="/c/Users/Kaveh/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-8.1.2-full_build/bin:$PATH"
+cd C:/dev/soccer-highlights
+./.venv/Scripts/python.exe .claude/skills/kaveh_soccer_highlights/scripts/goal_search.py \
+  --source-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Raw" \
+  --start-seconds 0 --end-seconds 660 \
+  --camera-note "camera behind white's goal in the first half, black attacks the near goal" \
+  --out-dir "C:/local/scratch/goal_search_<date>"
+# second pass, same out-dir, for far-end goals:
+#   ... same flags ... --far-crop
+# then cut review clips of the top candidates:
+#   ... same flags ... --render-top 4 --review-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Tests/goal_search"
+```
+
+What it does (full detail in the script's docstring):
+- Cuts the range from the **`.LRF` proxy only** into 105s windows overlapping
+  15s (`--window-seconds`/`--overlap-seconds`), ~640px, 10fps, small bitrate,
+  with `T=<global second>` burned into every frame so Gemini's timestamps map
+  straight back. Wall clock = the owning chunk's filename timestamp + offset
+  (`discover_chunks`); the table prints both.
+- One `gemini-flash-latest` call per window (not pro) with a purpose-built
+  "list every ball-in-goal moment" prompt and schema, not
+  `_DESCRIBE_PROMPT_V2`. `--camera-note` is the per-game camera/team context,
+  same information as `--near-cam-team-first-half` but as free text for the
+  stretch being scanned (say which half). `--timeout-seconds` defaults to 420
+  and `--retries` to 3: the 60s default timed out ~1/3 of the same day's
+  `pre-label` describe calls, and even at 420s the Oct-04 far-crop pass had
+  2 of 6 windows time out once before a retry succeeded.
+- `--far-crop` is a second pass on an 880x330 full-res crop of the
+  middle/far pitch (`--crop` to change it), aimed at far-end goals and kickoff
+  restarts. Far-end recall is poor even so; a far-end miss is "not found",
+  not "no goal".
+- Consolidates both passes' window JSONs in `--out-dir` and prints a ranked
+  table (global second, wall clock, status, confidence, end, team,
+  rationale). `probable` = two independent windows agree or a corroborator
+  (celebration, keeper fetching the ball, kickoff restart after); `possible`
+  = a single uncorroborated claim; `restart-only` = a restart with no goal
+  claim before it (look for an unseen goal in the ~2 min before). Check the
+  candidates against the tap constraints yourself: the goal must precede its
+  tap, and the totals must still match the final score.
+- `--render-top N` cuts `gsNN_<hhmmss>_g<globalsecond>.mp4` review clips
+  (~12s before to ~10s after, 1280px/30fps/crf23/veryfast/stereo AAC) into
+  `<out-dir>/review`, then copies them to `--review-dir`.
+- Resumable: a window with a valid JSON is skipped; rerun the identical
+  command after an interruption or for `FAILED windows`.
+
+**Cost**: ~17 flash calls for ~12 minutes of footage (both passes, retries
+included); Gemini itself takes ~20-90s per window. The window encodes are
+what vary: a 65s window encoded in 16s on an idle laptop (2026-10-05 retest,
+one call, found the goal), but each 105s window took 2.5-5 min on Oct-04
+while other jobs were running, and the two passes took over an hour of wall
+time end to end. Run it with nothing else heavy going.
+
+**Only Kaveh can confirm a goal.** Send him the review clip names and what
+each candidate claims; never report a candidate as confirmed from Gemini's
+output alone. Ask: "Is there a goal in `gs01_095708_g607.mp4`, and which
+team?"
+
+**Once confirmed, add it to `post_sheet.csv`** (next to `review_sheet.csv`;
+Step 4b) and export/post it like any other pick. The Oct-04 recipe:
+- Window from ~12s before the real goal to just past the (late) tap --
+  595.0 -> 636.0 (41s) there -- so the burned-in score flips at the TAP, per
+  the settled decision. Do not move the flip to the real goal.
+- Columns: `clip_file` = the `gsNN_...mp4` name; `start_seconds`,
+  `end_seconds`, `duration_seconds`; `source=mark`; `mark_category`
+  (`black_goal` there); `score_white`/`score_black` = the score as of the
+  clip START; `score_flip_seconds` = tap global second - `start_seconds`
+  (629.9 - 595.0 = 34.9); `score_flip_team`; `goal_this_end=True` for a
+  near-end goal.
+- Caption/description: run `label_audit.generate_description(clip,
+  duration, cfg.gemini, tap_context=marks.tap_claim("<category>"))` on the
+  review clip with `cfg.gemini.request_timeout_seconds = 420` and a few
+  retries (`generate_description` returns None on failure rather than
+  retrying itself); put the result in `gemini_score`/`gemini_caption`/
+  `gemini_description`.
+- Export with `seg_render.py --review-sheet <post_sheet.csv> --clip gsNN_...`
+  (Step 4), then sample one frame before and one after the flip
+  (`ffmpeg -ss <t> -i clip.mp4 -frames:v 1 out.png`) and check the score
+  changes. Pass the same `post_sheet.csv` to `telegram-post` (Step 5).
+
 ### Step 2 (optional, full-eval runs only) -- fill in verdict/notes, but DO NOT edit `review_sheet.csv` in Excel
 
 **Skip this step for a normal quick-share run** -- see the mode note at the
@@ -630,6 +799,13 @@ Re-measured 2026-08-23: 5s of footage took 188s end to end. Decode alone is a
 ~36s. A 10-clip / ~208s batch is therefore **~2.2 hours**. Don't run it alongside
 another heavy render/encode job.
 
+**Budget two figures, idle vs contended.** On 2026-10-04, with nothing else
+running, `seg_render.py` rendered the 41s `gs01` clip in ~7 min (~10x
+realtime, not 37x). Earlier the same day, exports ran ~18 min per clip while
+a 42GB robocopy to Drive, Drive's own sync, and two agents competed for the
+CPU. Don't run the Drive copy (or any other heavy job) at the same time as
+exports; finish one, then start the other.
+
 **Render to a LOCAL out-dir, then copy to `Sharable\`.** Writing a large file
 straight to the Google Drive path is what stalled and killed the first Aug-23
 attempts -- Drive FS warnings in the Windows event log lined up exactly with the
@@ -670,6 +846,11 @@ the two Farsi captions for the merged row. Then point **both** `export-picks`
 and `telegram-post` at `post_sheet.csv`; both only need those columns, and the
 real `review_sheet.csv` stays pristine.
 
+The same file carries the other derived rows: a window shifted earlier for a
+late tap (Step 1c), and a goal recovered by `goal_search.py` (Step 1d has the
+full column recipe). Copy the `score_*` columns along with the row so the
+scoreboard renders, and fix caption typos here, not in `review_sheet.csv`.
+
 ### Step 5 -- post to Telegram (`telegram-post`)
 
 **Always dry-run first:**
@@ -687,6 +868,9 @@ real Farsi, not `?` mojibake -- see Step 2's warning), bot credentials work
 (`getMe` check). `PYTHONIOENCODING=utf-8` avoids a `UnicodeEncodeError` crash when
 printing Farsi captions to a cp1252 Windows console -- cosmetic only, doesn't
 affect what actually gets sent, but without it you can't read the dry-run output.
+**Read every Farsi caption in the dry-run output for non-words**: Gemini can
+emit wrong-but-valid characters, not just `?` mojibake (2026-10-04: "شواب" for
+"شوت") -- fix them in `post_sheet.csv` (Step 4b), never in `review_sheet.csv`.
 
 **Posted in chronological (game) order automatically, not the order `--clips`
 lists them in** (fixed 2026-09-08, after Sep-06 was posted in rank/score
@@ -766,7 +950,7 @@ cd C:/dev/soccer-highlights
   --out-duration-seconds 40
 ```
 
-**Always sources from the `.LRF` proxy, never the 4K masters.** A literal speed-up needs to fully decode every source frame before `setpts`/`fps` can discard most of them -- there's no way around that cost regardless of hardware. At the 4K masters' established ~20x-realtime decode floor, a full ~82-minute game would take **over a day**; the `.LRF` proxy ran close to 1x realtime on the chunk-1 prototype (1493s of source in ~1500s wall time), putting a full game at roughly 80-90 minutes instead. Since the final output is also compressed to fit 50MB at ~40s (~10Mbps) and blurred by a 100x+ speedup either way, there is no visible quality argument for paying the 4K cost -- don't second-guess this without a real reason tied to a specific game.
+**Always sources from the `.LRF` proxy, never the 4K masters.** A literal speed-up needs to fully decode every source frame before `setpts`/`fps` can discard most of them -- there's no way around that cost regardless of hardware. At the 4K masters' established ~20x-realtime decode floor, a full ~82-minute game would take **over a day**; the `.LRF` proxy ran close to 1x realtime on the chunk-1 prototype (1493s of source in ~1500s wall time), putting a full game at roughly 80-90 minutes instead. Re-measured 2026-10-04 on an idle machine, reading the `.LRF`s from the memory card: the whole game finished in ~18 minutes. Budget ~18 minutes idle and the 80-90 figure when anything else is competing for the CPU (see Step 4's idle-vs-contended note). Since the final output is also compressed to fit 50MB at ~40s (~10Mbps) and blurred by a 100x+ speedup either way, there is no visible quality argument for paying the 4K cost -- don't second-guess this without a real reason tied to a specific game.
 
 **Design, for when this needs revisiting**: draws the scoreboard/clock against REAL time first (reusing `render.py`'s existing per-clip drawtext building blocks almost verbatim -- `_drawtext_score_stage`, `_drawtext_clock_stage`, `scoreboard.chrome_png`), THEN applies `setpts`/`fps` as the LAST stage of the filter graph to compress time. This means the already-correctness-tested score-flip and clock logic never has to know a speedup is coming -- it draws at real speed exactly like a normal export, and `setpts` squeezes the correct frames down afterward. The one real extension over the existing code is `_score_segments`, which generalizes `render._score_filters` (built for a single candidate clip, so it only ever handles 0-1 goals) to the several real goals a whole ~25-minute chunk contains -- it walks `marks.score_events()`'s sorted (time, team) list into contiguous (start, end, white, black) windows per chunk.
 
@@ -810,4 +994,9 @@ cd C:/dev/soccer-highlights
 | A PowerShell `Where-Object {$_.CommandLine -match ...}` filter via the Bash tool's nested `-Command` string returns empty even though the process is alive | Backslash-escaping `\$_` inside the Bash tool's double-quoted `-Command` string breaks the filter silently | Don't escape `$_`; if it still misbehaves, skip the filter and just check `LastWriteTime` |
 | Full 5-chunk audio decode gets OOM-killed | This laptop has only 8GB RAM, and other concurrent work (browser, other Claude sessions, other scripts) eats into the ~4GB typically free | Don't re-run `_run_detection`/`extract_audio_samples` just to recompute categories/provenance -- reconstruct from `events.json`'s cached peaks instead (no decode), cross-checking against the sheet's real `source` column before trusting it |
 | Near-cam goal tiering looks inverted (far-end goals ranked first, tier-1 descriptions say "far end") | `--near-cam-team-first-half` was given the team whose goal the camera is behind; it takes the team whose shots the camera captures (the attacker) | Cheap: `name-candidates --revert`, flip `is_near_cam_goal` True/False on the goal-tap rows of `review_sheet.csv`, then `name-candidates` again -- no render, no Gemini calls (done 2026-10-04). A `pre-label` re-run with the attacking team also works but redoes the full ~35-40 min render pass |
+| Tapped goal clip scores <3, describes midfield play or a stoppage (e.g. keeper swapping gloves) | Tap landed well after the goal; the 15s lookback / peak-anchored window starts after the ball is in the net | Step 1c (watch neighbours, shift the window earlier in `post_sheet.csv`); if no clip contains the goal, Step 1d `goal_search.py` |
+| High-score clip "is a goal" but has no tap, while tap totals match the final score | Gemini hallucination (post/crossbar shots, captions on untapped clips) or a late tap credited to a later clip | Watch it; trust the tally arithmetic over Gemini (Step 1c) |
+| Gemini describe `The read operation timed out` on ~1/3 of clips | 60s `gemini.request_timeout_seconds` default is too short for fps=10 video uploads | `SOCCER_HL__GEMINI__REQUEST_TIMEOUT_SECONDS=420`; retry only the failed rows via `run_describe_only` in a scratch script, not a full `pre-label` re-run (Step 1). Hit 2026-10-04: 20/61 failed, 17 recovered at 240s, last 3 at 420s |
+| Farsi caption reads fine but contains a non-word (e.g. "شواب" for "شوت") | Gemini emits wrong-but-valid characters, not only `?` mojibake | Read captions in the Step 5 dry-run; fix in `post_sheet.csv` |
+| Exports far slower than the same work idle | A Drive copy/sync or another agent competing for the CPU | Run heavy jobs one at a time (Step 4: ~10x realtime idle vs ~18 min/clip contended on Oct-04) |
 | MP4s won't fit on Drive/local disk for a same-day game | Full-res chunks are ~17GB each | Point `--source-dir` straight at the memory card (e.g. `D:/DCIM/DJI_001`) instead of copying to Drive -- copy just the small `.LRF` proxies there too (`robocopy ... *.LRF`) so `discover_chunks` finds matching pairs; keep `--out-dir`/tally CSV paths on Drive as usual. Card reads are local, not subject to the Google-Drive-path slowness this skill otherwise warns about |

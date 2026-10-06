@@ -21,7 +21,7 @@ prior sessions.
   Gemini scoring prompt (more likely to need revisiting as new games surface new
   edge cases).
 
-**`scripts/`** holds four promoted, reusable helpers. Know which is which:
+**`scripts/`** holds five promoted, reusable helpers. Know which is which:
 - `sweep_prompt.py` / `analyze_sweep.py` -- **eval only** (evals.md Part B). Run
   one Gemini describe profile over a labeled sheet, then compare profiles by
   P/R/F1. Not part of a normal weekly run.
@@ -31,6 +31,10 @@ prior sessions.
 - `timelapse_render.py` -- **optional, only on request** (processing.md Step 6).
   Speeds the whole game down to a short clip with the scoreboard/clock burned
   in. Not part of the normal weekly flow -- only run it if Kaveh asks.
+- `goal_search.py` -- **weekly workflow, only when the tap-vs-Gemini check
+  says so** (processing.md Step 1c -> 1d). Scans a stretch of `.LRF` footage
+  with Gemini for goals no rendered clip contains (typically a late tap) and
+  cuts review clips of the candidates for Kaveh to confirm.
 
 ## The one-sentence pipeline
 
@@ -188,6 +192,14 @@ marks) -> posted to a Telegram group with the Farsi caption.
     (2026-09-08, Kaveh's explicit instruction; the earlier session had
     instead worked around it downstream, which he considers the wrong fix
     once a real duplicate is confirmed).
+- **The tap-vs-Gemini check is the complement of "taps beat Gemini"**
+  (2026-10-04, processing.md Step 1c): a tap is trusted on *whether* a goal
+  happened, not on *when*. A tapped goal clip scoring <3 (or not describing
+  a goal) is a mandatory look, not a drop -- on Oct-04 two late taps
+  produced clips that began after the ball was in the net. Gemini can't be
+  trusted either way near the tap boundary. A goal recovered with
+  `goal_search.py` (Step 1d) is only real once Kaveh confirms it by
+  watching, and its clip still flips the score at the tap.
 - **A decrement (Tallies' minus button) is NOT auto-resolved as an undo**
   (changed 2026-09-07 in `load_tallies_csv`, after Sep-06 showed a decrement
   landing 2.5 minutes after the press it was meant to cancel, with no
