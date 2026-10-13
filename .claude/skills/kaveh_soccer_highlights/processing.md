@@ -258,6 +258,79 @@ What to read off the output:
   a lot of them is worth checking `score_flip_cap_seconds` or the game's
   press-lag assumptions before running Step 1.
 
+### Step 0d -- infer the camera position (`infer-camera`)
+
+Report-only, no render and no API calls (~1-2 min: 36 single-frame ffmpeg
+seeks per chunk off the `.LRF`). Replaces asking Kaveh "whose shots does the
+camera see" every game -- ask only when it comes back inconclusive.
+
+```bash
+export PATH="/c/Users/Kaveh/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-8.1.2-full_build/bin:$PATH"
+cd C:/dev/soccer-highlights
+./.venv/Scripts/python.exe -m soccer_highlights.cli \
+  --source-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Raw" \
+  infer-camera --out-dir "C:/local/scratch/camera_<date>" \
+  [--frames 36] [--goal-box x0,y0,x1,y1]
+```
+
+What it does (`soccer_highlights/camera_position.py`): the camera sits behind
+one goal for the whole game and does not move -- the *teams* swap ends at
+halftime. Per chunk it locates that near goal in the median background (red
+pop-up frame first, then a white metal frame; `--goal-box` is a manual
+override in frame fractions), finds the person nearest it in each sampled
+frame, and votes whether that person's torso is **white or not-white** (never
+"black": the other team wears teal, orange, magenta or dark). Chunks are
+mapped to halves with the same recording-gap halftime detector `pre-label`
+uses, and the second half must read as the OPPOSITE of the first.
+
+Reading the output:
+
+- **Per-chunk table**: `votes` are frames with a person at the goal; `white%`
+  >= 60% -> white defends the near goal, <= 30% -> not-white, in between or
+  fewer than 12 votes -> inconclusive. A chunk can also be voided outright
+  (`no near goal found`, `overcast scene`) -- shown, never combined.
+- **`Suggested: --near-cam-team-first-half X`** is already inverted for the
+  flag's semantics (camera behind white's goal -> `black`). `INCONCLUSIVE`
+  means no suggestion -- read the warnings, look at the contact sheet, or ask
+  Kaveh.
+- **The contact sheet is the gate** (`camera_contact_sheet.png`, one row per
+  chunk): green box = voted white, magenta = not-white, yellow = the goal
+  footprint. Check that the boxed person really stands at the near goal and
+  that a green/magenta label matches the shirt you see. A confident table
+  over a sheet of boxes on net shadow or far-field players is still wrong.
+- **Confidence `high`** needs both a readable first half and an opposite
+  second half. `medium` = second half unreadable or no halftime gap (only the
+  first chunk answers; a later opposite chunk is accepted as swap evidence).
+  Any of: second half reads the SAME team, conclusive chunks disagreeing
+  inside the first half, or an unreadable first half -> no suggestion.
+
+**Worked example, Oct-11**: same red pop-up goal near-left in all three
+chunks; chunk 1 (09:59, before the 10:24 -> 10:52 gap) 29/31 white, chunks 2-3
+1/24 and 1/29 -> behind white's goal first half, behind black's second ->
+`--near-cam-team-first-half black`.
+
+**Validation (2026-10-12), be honest about what this does and doesn't show.**
+Truth is Kaveh's memory notes, not labeled frames:
+
+| Game | Setup | Result | vs. truth |
+|---|---|---|---|
+| Oct-11 | red pop-up goal, sunny | H1 white 94% (31 votes), H2 4% / 3% -> `black`, high | consistent (white goal first half) |
+| Oct-04 | white metal goal, sunny, 5 chunks | H1 96% / 100%, H2 4% / 0%, 10 s stub inconclusive (5 votes) -> `black`, high | matches |
+| Sep-27 | red pop-up, overcast, camera bumped mid-chunk 1, no recording gap | chunk 1 voided (overcast guard), chunks 2-3 no goal found, chunk 4 not-white 24/24 -> **inconclusive** | truth (white goal first half) not recovered; it does NOT report a wrong answer |
+| Aug-30 / Aug-23 | unlabeled (`.MP4`+`.LRF` on Drive) | **not run** -- skipped while a render held the CPU; Sep-06 can't run (`.LRF` only) | no further evidence beyond the three games above |
+
+Known limits: **overcast skies are refused** (ground/shirts meter ~2x darker
+under a bright grey sky and the white threshold is not validated there --
+Sep-27 is the only overcast data and it is not enough to tune on); a keeper
+standing *inside* the goal mouth is ignored on purpose (net shadow and net
+flapping read as people there); someone standing motionless for > half the
+chunk is absorbed into the median background; a camera that is bumped is
+re-aligned on the red frame only (no white-goal alignment); games where the
+red/white locator finds nothing need `--goal-box`; a continuous recording
+(Sep-27: chunks back to back, halftime has no gap) can only be answered from
+the first chunk. Needs `.MP4`+`.LRF` pairs (Sep-06's `Raw\` has `.LRF` only
+-> `discover_chunks` finds nothing).
+
 ### Step 1 -- detect candidates + Gemini describe (`pre-label`)
 
 ```bash
@@ -278,9 +351,10 @@ cd C:/dev/soccer-highlights
 **`--near-cam-team-first-half`** (added 2026-09-07): which team's SHOTS the
 camera captures in the FIRST half, i.e. the **attacking** team -- the
 opposite of the team whose own goal the camera is behind (camera behind
-white's goal -> pass `black`). Ask Kaveh every game, it's not derivable from
-the footage, and phrase the question as "whose shots does the camera see",
-not "whose goal is it behind". Drives review order's near-field-goal tier
+white's goal -> pass `black`). **Run Step 0d (`infer-camera`) and use its
+suggestion** -- it is derivable from the footage after all; ask Kaveh only
+when it comes back inconclusive, and phrase that question as "whose shots
+does the camera see", not "whose goal is it behind". Drives review order's near-field-goal tier
 ahead of Gemini's `goal_this_end` for any genuine goal tap (see SKILL.md's
 settled-decisions list). Halftime is auto-detected from the recording gap;
 omitting the flag just falls back to `goal_this_end`, not a broken run.
@@ -994,6 +1068,8 @@ cd C:/dev/soccer-highlights
 | A PowerShell `Where-Object {$_.CommandLine -match ...}` filter via the Bash tool's nested `-Command` string returns empty even though the process is alive | Backslash-escaping `\$_` inside the Bash tool's double-quoted `-Command` string breaks the filter silently | Don't escape `$_`; if it still misbehaves, skip the filter and just check `LastWriteTime` |
 | Full 5-chunk audio decode gets OOM-killed | This laptop has only 8GB RAM, and other concurrent work (browser, other Claude sessions, other scripts) eats into the ~4GB typically free | Don't re-run `_run_detection`/`extract_audio_samples` just to recompute categories/provenance -- reconstruct from `events.json`'s cached peaks instead (no decode), cross-checking against the sheet's real `source` column before trusting it |
 | Near-cam goal tiering looks inverted (far-end goals ranked first, tier-1 descriptions say "far end") | `--near-cam-team-first-half` was given the team whose goal the camera is behind; it takes the team whose shots the camera captures (the attacker) | Cheap: `name-candidates --revert`, flip `is_near_cam_goal` True/False on the goal-tap rows of `review_sheet.csv`, then `name-candidates` again -- no render, no Gemini calls (done 2026-10-04). A `pre-label` re-run with the attacking team also works but redoes the full ~35-40 min render pass |
+| `infer-camera` says `inconclusive` / `no near goal found` / `overcast scene` | Thin votes, goal locator found no red or white frame, or a grey sky voids shirt colour; a continuous recording has no halftime gap to place the second half with | Read the warnings and the contact sheet; retry with `--goal-box`; otherwise ask Kaveh "whose shots does the camera see" (Step 0d) |
+| `infer-camera` contact sheet shows boxes on net, shadows or far-field players | Goal footprint wrong (e.g. only one red pole found), or the real keeper is inside the mouth and ignored | Don't trust the table; pass `--goal-box`, or ask Kaveh |
 | Tapped goal clip scores <3, describes midfield play or a stoppage (e.g. keeper swapping gloves) | Tap landed well after the goal; the 15s lookback / peak-anchored window starts after the ball is in the net | Step 1c (watch neighbours, shift the window earlier in `post_sheet.csv`); if no clip contains the goal, Step 1d `goal_search.py` |
 | High-score clip "is a goal" but has no tap, while tap totals match the final score | Gemini hallucination (post/crossbar shots, captions on untapped clips) or a late tap credited to a later clip | Watch it; trust the tally arithmetic over Gemini (Step 1c) |
 | Gemini describe `The read operation timed out` on ~1/3 of clips | 60s `gemini.request_timeout_seconds` default is too short for fps=10 video uploads | `SOCCER_HL__GEMINI__REQUEST_TIMEOUT_SECONDS=420`; retry only the failed rows via `run_describe_only` in a scratch script, not a full `pre-label` re-run (Step 1). Hit 2026-10-04: 20/61 failed, 17 recovered at 240s, last 3 at 420s |

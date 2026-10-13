@@ -200,6 +200,18 @@ marks) -> posted to a Telegram group with the Farsi caption.
   trusted either way near the tap boundary. A goal recovered with
   `goal_search.py` (Step 1d) is only real once Kaveh confirms it by
   watching, and its clip still flips the score at the tap.
+- **The camera's side is inferred from footage, not asked for** (2026-10-12,
+  `infer-camera`, processing.md Step 0d). The camera never moves within a
+  game -- the TEAMS swap ends at halftime, so the team behind whose goal it
+  sits flips (Oct-11: same red pop-up goal near-left in every chunk, halftime
+  gap 10:24 -> 10:52). The inference votes the shirt colour of whoever stands
+  nearest the near goal over ~36 sampled frames per chunk, classifying
+  **white vs not-white** -- never "black": the other team wears teal, orange,
+  magenta or dark depending on the week. It is **advisory and prefers
+  `inconclusive` to a wrong answer**: thin votes, an overcast sky, no goal
+  found, a first half that disagrees with itself, or no swap at halftime all
+  return no suggestion, and the contact sheet is the human gate. Don't turn
+  it into an unattended input to `pre-label`.
 - **A decrement (Tallies' minus button) is NOT auto-resolved as an undo**
   (changed 2026-09-07 in `load_tallies_csv`, after Sep-06 showed a decrement
   landing 2.5 minutes after the press it was meant to cancel, with no

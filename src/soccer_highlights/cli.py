@@ -96,6 +96,12 @@ Subcommands:
                   is correct against real data before it feeds pre-label's
                   candidate set. Also prints the watch's white/black tally
                   for the free score-checksum sanity check.
+  infer-camera  - report-only: sample frames from each chunk's .LRF, vote on
+                  the shirt colour (white vs not-white) of whoever stands
+                  nearest the goal the camera sits behind, and print which
+                  team that is per chunk/half plus the suggested
+                  --near-cam-team-first-half value. Writes a contact sheet
+                  to eyeball before trusting it (see camera_position.py).
 """
 
 from __future__ import annotations
@@ -111,7 +117,17 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from soccer_highlights import clipping, label_audit, marks, render, telegram, vision, vision_eval, vision_gemini
+from soccer_highlights import (
+    camera_position,
+    clipping,
+    label_audit,
+    marks,
+    render,
+    telegram,
+    vision,
+    vision_eval,
+    vision_gemini,
+)
 from soccer_highlights.audio import extract_audio_samples
 from soccer_highlights.config import Config, load_config, load_strategy_configs
 from soccer_highlights.detection import analyze
@@ -1185,6 +1201,66 @@ def cmd_ingest_marks(
         print(f"\nWrote {out_path}")
 
 
+def _parse_goal_box(text: str | None) -> tuple[float, float, float, float] | None:
+    if text is None:
+        return None
+    try:
+        x0, y0, x1, y1 = (float(part) for part in text.split(","))
+    except ValueError:
+        raise SystemExit(f"--goal-box expects x0,y0,x1,y1 as frame fractions, got {text!r}") from None
+    if not (0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1):
+        raise SystemExit(f"--goal-box fractions must satisfy 0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1, got {text!r}")
+    return x0, y0, x1, y1
+
+
+def cmd_infer_camera(cfg: Config, out_dir: str | None, n_frames: int, goal_box: str | None) -> None:
+    chunks = discover_chunks(cfg.input.source_dir)
+    override = _parse_goal_box(goal_box)
+    results: list[camera_position.ChunkResult] = []
+    for chunk in chunks:
+        source = chunk.lrf_path or chunk.mp4_path
+        print(f"Sampling chunk #{chunk.sequence}: {source.name} ({n_frames} frames)")
+        frames = camera_position.sample_frames(source, chunk.duration_seconds, n_frames)
+        results.append(camera_position.analyse_chunk(frames, chunk.sequence, source.name, override))
+
+    game = camera_position.infer_game(results, chunks)
+    halftime = game.halftime_seconds
+
+    print(f"\n{'chunk':>5} {'start':>8} {'frames':>6} {'votes':>5} {'white':>5} {'other':>5} {'white%':>6}  {'goal':<11} verdict")
+    by_seq = {c.sequence: c for c in chunks}
+    for r in game.chunks:
+        chunk = by_seq[r.sequence]
+        pct = "-" if r.white_fraction is None else f"{r.white_fraction:.0%}"
+        locator = r.goal.locator if r.goal else "none"
+        half = "" if halftime is None else (" [H2]" if chunk.global_start_seconds >= halftime else " [H1]")
+        print(
+            f"{r.sequence:>5} {chunk.start_time:%H:%M:%S} {r.n_frames:>6} {r.n_votes:>5} {r.white_votes:>5} "
+            f"{r.nonwhite_votes:>5} {pct:>6}  {locator:<11} {r.verdict}{half}"
+            + (f"  ({r.reason})" if r.reason else "")
+        )
+
+    where = "no halftime gap detected" if halftime is None else f"halftime at global {halftime:.0f}s"
+    print(f"\nHalves: first={game.first_half}, second={game.second_half} ({where}); swap as expected: {game.flip_as_expected}")
+    print(f"Confidence: {game.confidence}")
+    for warning in game.warnings:
+        print(f"  WARNING: {warning}")
+    if game.near_cam_team_first_half == "inconclusive":
+        print("\nSuggested --near-cam-team-first-half: INCONCLUSIVE -- look at the contact sheet and/or ask Kaveh.")
+    else:
+        print(
+            f"\nCamera is behind {game.behind_goal_first_half}'s goal in the first half, so it captures "
+            f"{game.near_cam_team_first_half}'s shots.\nSuggested: --near-cam-team-first-half "
+            f"{game.near_cam_team_first_half}"
+        )
+
+    target = Path(out_dir) if out_dir else Path(tempfile.mkdtemp(prefix="infer_camera_"))
+    target.mkdir(parents=True, exist_ok=True)
+    sheet_path = target / "camera_contact_sheet.png"
+    camera_position.contact_sheet(game.chunks).save(sheet_path)
+    print(f"Contact sheet (green = voted white, magenta = not-white, yellow = goal): {sheet_path}")
+    print("Eyeball it before trusting the suggestion: the boxed person should be the one at the near goal.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sunday Soccer Highlights Engine")
     parser.add_argument("--config", type=str, default=None, help="Path to a config YAML file (default: config/default.yaml)")
@@ -1412,6 +1488,25 @@ def main() -> None:
         "clap-sync residual off the report, then re-run with that value (never applied automatically)",
     )
 
+    infer_camera_parser = subparsers.add_parser(
+        "infer-camera",
+        help="Report-only: infer which team defends the goal the camera sits behind (shirt-colour vote on "
+        "sampled .LRF frames) and suggest --near-cam-team-first-half; writes a contact sheet to eyeball",
+    )
+    infer_camera_parser.add_argument(
+        "--out-dir", default=None, help="Where to write camera_contact_sheet.png (default: a new temp dir)"
+    )
+    infer_camera_parser.add_argument(
+        "--frames", type=int, default=36, help="Frames sampled per chunk by seeking (default 36)"
+    )
+    infer_camera_parser.add_argument(
+        "--goal-box",
+        default=None,
+        metavar="X0,Y0,X1,Y1",
+        help="Near goal's box as frame fractions, e.g. 0.05,0.45,0.25,0.8 -- only when the automatic "
+        "red/white goal locator finds nothing",
+    )
+
     args = parser.parse_args()
     cfg = load_config(args.config)
     if args.source_dir:
@@ -1475,6 +1570,8 @@ def main() -> None:
         cmd_ingest_marks(
             cfg, args.marks_csv, args.tally_csv, args.out, args.final_score, args.clock_offset_seconds
         )
+    elif args.command == "infer-camera":
+        cmd_infer_camera(cfg, args.out_dir, args.frames, args.goal_box)
 
 
 if __name__ == "__main__":
