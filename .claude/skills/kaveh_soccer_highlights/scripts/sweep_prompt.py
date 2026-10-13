@@ -14,12 +14,17 @@ adding a new profile to compare needs zero code edits, just a new invocation.
 Usage (run from repo root, with the project venv):
 
   ./.venv/Scripts/python.exe .claude/skills/kaveh_soccer_highlights/scripts/sweep_prompt.py \
-      --candidates-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Tests/pre_label/candidates" \
-      --out-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Tests/pre_label/sweep_results" \
+      --review-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Review" \
+      --out-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Review/sweep_results" \
       --tag v2_flash_10fps --prompt v2 --model gemini-flash-latest --fps 10 --schema
 
 Re-running the identical command is always safe and resumes -- only rows with a
 null `describe` entry in the cache get retried.
+
+Folder names: --review-dir is the game's flat Review\\ folder (the old
+--candidates-dir spelling still works; for games before 2026-10-11 point it at
+Tests\\pre_label\\candidates). sweep_results is an eval-only subfolder -- it
+only exists on a run that is actually tuning the prompt.
 """
 
 from __future__ import annotations
@@ -44,9 +49,15 @@ PROMPTS = {"v1": _DESCRIBE_PROMPT, "v2": _DESCRIBE_PROMPT_V2}
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--candidates-dir", required=True, help="Directory containing review_sheet.csv and clip_NNN.mp4 files")
     parser.add_argument(
-        "--review-sheet", default=None, help="Override path to the review sheet (default: <candidates-dir>/review_sheet.csv)"
+        "--review-dir",
+        "--candidates-dir",  # deprecated alias, pre-2026-10-12 spelling
+        dest="candidates_dir",
+        required=True,
+        help="The game's Review folder: contains review_sheet.csv and the clip files",
+    )
+    parser.add_argument(
+        "--review-sheet", default=None, help="Override path to the review sheet (default: <review-dir>/review_sheet.csv)"
     )
     parser.add_argument("--out-dir", required=True, help="Where this profile's describe_cache_<tag>.json is written")
     parser.add_argument("--tag", required=True, help="Label for this profile, e.g. 'v2_flash_10fps' -- used in the cache filename")

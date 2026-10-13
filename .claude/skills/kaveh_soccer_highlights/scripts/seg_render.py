@@ -33,7 +33,7 @@ until it prints DONE:
 
   ./.venv/Scripts/python.exe .claude/skills/kaveh_soccer_highlights/scripts/seg_render.py \
       --source-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Raw" \
-      --review-sheet "G:/.../Tests/pre_label/post_sheet.csv" \
+      --review-sheet "G:/.../<date>/Review/post_sheet.csv" \
       --clip "r30_31_s2_821a_c025_c026.mp4" \
       --crf 24 \
       --out-dir "C:/local/scratch/export" \
@@ -42,7 +42,7 @@ until it prints DONE:
 Render to a LOCAL --out-dir, not straight to the Google Drive folder: writing
 a large file to the Drive path is what stalled and killed the first attempts
 (Drive FS warnings in the Windows event log lined up exactly with the deaths).
-Copy the finished clips to the Sharable folder afterwards.
+Copy the finished clips to the game's flat Share\\ folder afterwards.
 
 Pick --crf per clip from its duration and measured size, not from a rule of
 thumb -- see ExportConfig's comment on the ~5x motion-dependent size spread

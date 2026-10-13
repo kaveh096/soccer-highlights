@@ -599,7 +599,9 @@ cheaper even than `label-audit`'s already-cheap tier, since this is
 meant to run quickly on a long, not-yet-tuned recording), generates a
 Gemini description for each with no judge step (there's no human label
 yet to compare against), and writes one `review_sheet.csv` +
-`events.json` in the same shape a `batch-review` strategy folder uses
+`events.json` flat into DIR (a game's `Review\` folder; before 2026-10-11
+these went into `DIR/candidates/`) in the same shape a `batch-review`
+strategy folder uses
 (clip_file/start/end/duration/max_peak_score/verdict/notes, verdict and
 notes left blank for a human to fill in) plus a bonus
 `gemini_description` column -- reuses `scoring.generate_review_sheet`

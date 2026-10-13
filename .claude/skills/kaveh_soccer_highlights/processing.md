@@ -109,31 +109,47 @@ G:\My Drive\Photos and Movies\Sunday Soccer\<date>\
     tally_white_goal.csv            the three Tallies watch exports, one per
     tally_black_goal.csv            counter -- live-tagged marks for this game
     tally_moment.csv                (see Step 0b; absent if the watch wasn't used)
-  Tests\
-    pre_label\
-      candidates\
-        clip_001.mp4 ... clip_NNN.mp4   review-quality renders (1280px/30fps/
-                                         crf23/veryfast/stereo, from .LRF) --
-                                         the SAME file a human watches, Gemini
-                                         scores, and label-audit later re-checks
-        review_sheet.csv                clip_file/start/end/duration/max_peak_score/
-                                         verdict/notes/source/gemini_score/
-                                         gemini_caption/gemini_description --
-                                         verdict/notes start blank, fill them in
-                                         during Part 3 Step 2. `source` is only
-                                         meaningful on a watch-tagged game (Step 0b)
-        events.json                     raw detected intervals
-        descriptions_cache.json         resumable Gemini describe-call cache
-  Sharable\
-    clip_NNN.mp4 ...                  final share-quality exports (2560px, CRF
+  Review\                           FLAT -- everything you look at to decide
+    clip_001.mp4 ... clip_NNN.mp4     review-quality renders (1280px/30fps/
+                                       crf23/veryfast/stereo, from .LRF) --
+                                       the SAME file a human watches, Gemini
+                                       scores, and label-audit later re-checks.
+                                       After Step 1b they are r01_s5_..._c032.mp4
+    review_sheet.csv                  clip_file/start/end/duration/max_peak_score/
+                                       verdict/notes/source/gemini_score/
+                                       gemini_caption/gemini_description --
+                                       verdict/notes start blank, fill them in
+                                       during Part 3 Step 2. `source` is only
+                                       meaningful on a watch-tagged game (Step 0b)
+    post_sheet.csv                    derived pick sheet (Step 4b), only if needed
+    events.json                       raw detected intervals
+    descriptions_cache.json           resumable Gemini describe-call cache
+    DECREMENTS_PENDING.txt            only while a Tallies decrement is unresolved
+    gsNN_<hhmmss>_g<sec>.mp4          goal_search.py review clips (Step 1d), if any
+  Share\                            FLAT -- everything that gets posted
+    <exported clips>.mp4              final share-quality exports (2560px, CRF
                                        override for Telegram, from full-res .MP4)
+    timelapse_final.mp4               whole-game timelapse (Step 6), if made
     .telegram_sent.json               tracks which clip_files have been posted,
                                        so a rerun never double-posts
 ```
 
+Three folders, named for what you do in them (2026-10-12): `Raw\` in, `Review\`
+decide, `Share\` post. `pre-label --out-dir` IS the `Review\` folder -- it writes
+flat into it, no `candidates\` subfolder. The metadata filenames are unchanged.
+The only extra subfolder is `Review\sweep_results\`, and only on an evals.md
+Part B prompt-tuning run.
+
+**Games before 2026-10-11 use the old layout** -- `Tests\pre_label\candidates\`
+(where `Review\` now is), `Tests\goal_search\` and `Sharable\` (where `Share\`
+now is). Nothing migrated: every command takes explicit paths, so
+`name-candidates --review-dir` (alias `--candidates-dir`), `export-picks
+--review-sheet`, `telegram-post --clips-dir` etc. simply point at the old folders.
+
 Every command below needs an explicit `--source-dir` (global CLI flag, points at
-`Raw\`) and/or `SOCCER_HL__...` env var override -- `config/default.yaml`'s
-defaults still point at old repo-relative paths that no longer exist.
+`Raw\`, or at the memory card -- see Step 0) and/or `SOCCER_HL__...` env var
+override -- `config/default.yaml`'s defaults still point at old repo-relative
+paths that no longer exist.
 
 ---
 
@@ -162,13 +178,35 @@ Don't assume a given week's `review_sheet.csv` has verdicts filled in just
 because clips already got posted -- check before treating a sheet as eval-
 ready ground truth for evals.md Part B.
 
-### Step 0 -- get footage onto Drive
+### Step 0 -- get footage onto Drive (AFTER the heavy jobs, not before)
 
-Copy the DJI card's `DJI_*_D.MP4` + `.LRF` files into a new
-`G:\My Drive\Photos and Movies\Sunday Soccer\<date>\Raw\` folder. If Drive sync is
-flaky reading freshly-uploaded `.LRF` files (seen as ffmpeg `0xC0000006
-STATUS_IN_PAGE_ERROR`), use `--lrf-cache-dir` in Step 1 to redirect heavy reads to
-a local copy:
+Every DJI `DJI_*_D.MP4` + `.LRF` on the card ends up in
+`G:\My Drive\Photos and Movies\Sunday Soccer\<date>\Raw\` -- but **don't copy
+first**. Point `--source-dir` at the memory card (`D:/DCIM/DJI_001`, card reads
+are local) for Step 0c/1/6 and the Step 4 exports, then copy the whole card in
+the one stretch of the flow that is otherwise idle CPU: **while Kaveh reviews
+and picks clips**. Never run the Drive copy at the same time as `pre-label`, the
+timelapse or the exports (this laptop has 2 cores and Drive sync competes; see
+Step 4's idle-vs-contended note).
+
+Worked example, Oct-11 (the order that worked): `ingest-marks` -> `pre-label`
+(~45 min, card as source) -> `name-candidates` -> timelapse phase 1 (~20 min) ->
+`robocopy` LRFs then MP4s in chunk order (41 GB, ~12 min on the Drive mirror)
+while Kaveh reviewed -> exports from the card -> post clips -> timelapse ->
+raw-footage message (Step 5b) last, once Drive's cloud upload finished. The
+tally CSVs go straight into `Raw\` at Step 0b regardless -- they're tiny.
+```bash
+robocopy "D:\DCIM\DJI_001" "G:\My Drive\Photos and Movies\Sunday Soccer\<date>\Raw" *.LRF /R:5 /W:15 /NP
+robocopy "D:\DCIM\DJI_001" "G:\My Drive\Photos and Movies\Sunday Soccer\<date>\Raw" *.MP4 /R:5 /W:15 /NP
+```
+(robocopy exit code 1 = files copied, not failure.) Afterwards verify byte
+sizes card vs. Drive for every file. `robocopy` returning only means the local
+Drive mirror has the file -- Drive's own upload to the cloud can still be
+running, so wait for it before posting a share link.
+
+If Drive sync is flaky reading freshly-uploaded `.LRF` files from `Raw\` (seen
+as ffmpeg `0xC0000006 STATUS_IN_PAGE_ERROR`), use `--lrf-cache-dir` in Step 1
+to redirect heavy reads to a local copy:
 ```bash
 robocopy "G:\...\<date>\Raw" "C:\local\lrf\<date>" *.LRF /R:5 /W:15
 ```
@@ -339,7 +377,7 @@ cd C:/dev/soccer-highlights
 ./.venv/Scripts/python.exe -m soccer_highlights.cli \
   --source-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Raw" \
   pre-label \
-  --out-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Tests/pre_label" \
+  --out-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Review" \
   [--lrf-cache-dir "C:/local/lrf/<date>"] \
   [--tally-csv "white_goal=G:/.../<date>/Raw/tally_white_goal.csv"] \
   [--tally-csv "black_goal=G:/.../<date>/Raw/tally_black_goal.csv"] \
@@ -439,7 +477,7 @@ list is always true and silently overcounts successes -- this cost a whole
 monitoring cycle of wrong progress reports on Aug-30 before being caught. Count
 real successes with:
 ```bash
-python -c "import json; d=json.load(open(r'<out_dir>/candidates/descriptions_cache.json', encoding='utf-8')); missing=[v['clip_file'] for v in d if v.get('describe') is None]; print(len(d)-len(missing), '/', len(d), 'missing:', missing)"
+python -c "import json; d=json.load(open(r'<out_dir>/descriptions_cache.json', encoding='utf-8')); missing=[v['clip_file'] for v in d if v.get('describe') is None]; print(len(d)-len(missing), '/', len(d), 'missing:', missing)"
 ```
 
 **If a `pre-label` run launched via the Bash tool's `run_in_background` gets
@@ -458,7 +496,7 @@ $argList = @(
   "-u", "-m", "soccer_highlights.cli",
   "--source-dir", '"G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Raw"',
   "pre-label",
-  "--out-dir", '"G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Tests/pre_label"',
+  "--out-dir", '"G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Review"',
   "--fps", "15",
   "--lrf-cache-dir", '"C:/local/lrf/<date>"'
 )
@@ -515,7 +553,7 @@ the marks and fills in four `score_*` columns.** Two things to do with that:
   posted clips showed an inflated black score (12, not the agreed 10).
   **Fixed 2026-09-08, don't rely on remembering this**: whenever any
   category has unresolved decrements, `pre-label` now writes
-  `candidates/DECREMENTS_PENDING.txt` and prints a `***`-bracketed warning
+  `Review\DECREMENTS_PENDING.txt` and prints a `***`-bracketed warning
   naming the count per category. **Treat this file's existence as a hard
   stop**: before Step 3/4, ask Kaveh directly which specific press(es) each
   decrement was meant to cancel, then either drop that press from the
@@ -545,7 +583,7 @@ stale the moment another describe retry lands).
 ./.venv/Scripts/python.exe -m soccer_highlights.cli \
   --source-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Raw" \
   name-candidates \
-  --candidates-dir "G:/.../Tests/pre_label/candidates"
+  --review-dir "G:/.../<date>/Review"
 ```
 
 Renames `clip_002.mp4` -> `r01_s4_746a_c002.mp4`: **r**eview rank, gemini
@@ -658,7 +696,7 @@ cd C:/dev/soccer-highlights
 # second pass, same out-dir, for far-end goals:
 #   ... same flags ... --far-crop
 # then cut review clips of the top candidates:
-#   ... same flags ... --render-top 4 --review-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Tests/goal_search"
+#   ... same flags ... --render-top 4 --review-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Review"
 ```
 
 What it does (full detail in the script's docstring):
@@ -733,7 +771,7 @@ Step 4b) and export/post it like any other pick. The Oct-04 recipe:
 top of Part 3. Only do this when the goal is building/refreshing labeled
 ground truth for evals.md Part B.
 
-Watch the clips in `Tests\pre_label\candidates\`, fill in each row's `verdict`
+Watch the clips in `Review\`, fill in each row's `verdict`
 (same 1-5 highlight-worthiness scale Gemini uses) and `notes` columns. Use
 `gemini_score` to triage which clips to watch first, but **scan the whole
 sheet** -- the score is for sorting, not an automatic filter (see SKILL.md).
@@ -773,10 +811,10 @@ cd C:/dev/soccer-highlights
 ./.venv/Scripts/python.exe -m soccer_highlights.cli \
   --source-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Raw" \
   export-picks \
-  --review-sheet "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Tests/pre_label/candidates/review_sheet.csv" \
+  --review-sheet "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Review/review_sheet.csv" \
   --clips clip_0NN.mp4,clip_0MM.mp4,... \
   --crf 30 \
-  --out-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Sharable"
+  --out-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Share"
 ```
 Re-encodes just the picked clips (by `clip_file`, reading start/end straight from
 the sheet -- no re-detection, no index-drift risk) from the **full-res 4K `.MP4`**
@@ -880,7 +918,7 @@ a 42GB robocopy to Drive, Drive's own sync, and two agents competed for the
 CPU. Don't run the Drive copy (or any other heavy job) at the same time as
 exports; finish one, then start the other.
 
-**Render to a LOCAL out-dir, then copy to `Sharable\`.** Writing a large file
+**Render to a LOCAL out-dir, then copy to `Share\`.** Writing a large file
 straight to the Google Drive path is what stalled and killed the first Aug-23
 attempts -- Drive FS warnings in the Windows event log lined up exactly with the
 deaths (`Get-WinEvent -FilterHashtable @{LogName='System'; ID=42,107,1}`).
@@ -932,8 +970,8 @@ scoreboard renders, and fix caption typos here, not in `review_sheet.csv`.
 cd C:/dev/soccer-highlights
 PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe -m soccer_highlights.cli \
   telegram-post \
-  --review-sheet "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Tests/pre_label/candidates/review_sheet.csv" \
-  --clips-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Sharable" \
+  --review-sheet "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Review/review_sheet.csv" \
+  --clips-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Share" \
   --clips clip_0NN.mp4,clip_0MM.mp4,... \
   --dry-run
 ```
@@ -1034,6 +1072,8 @@ cd C:/dev/soccer-highlights
 
 **Audio** is one continuous real-speed snippet (not per-goal synced bursts) from a lively stretch of play, picked via `--audio-start-seconds` (a global game-second) -- pick something worth hearing (e.g. the moments around a clean near-cam goal), don't rely on the default heuristic without checking it lands somewhere good.
 
+**Filing**: the render goes to a local scratch dir (never straight to Drive); copy `timelapse_final.mp4` into the game's `Share\` folder so the game's posted artifacts live in one place.
+
 **Posting**: not part of `telegram-post`'s sheet-driven flow (it isn't a `review_sheet.csv` row) -- send it as a separate `telegram-post`/`sendVideo`-equivalent call with its own short Farsi caption, after the regular picked clips.
 
 ---
@@ -1050,7 +1090,7 @@ cd C:/dev/soccer-highlights
 | Background job silently dies, no error | Laptop sleep, or the terminal app closing overnight | Check `Get-CimInstance Win32_OperatingSystem \| select LastBootUpTime`; design for resumability, not a one-shot fix |
 | Two heavy jobs compete for CPU | Another render/API job still running | `Get-CimInstance Win32_Process \| Where-Object Name -match 'ffmpeg\|python'` before starting a heavy step |
 | Render dies partway, leaves a big file | Killed mid-encode -- no `moov` atom written | Never trust `size > 0`; `render.is_playable()` / `ffprobe` it. `export-picks` + `seg_render.py` now auto-delete and re-render these |
-| Long render killed repeatedly, no progress | Writing straight to the Google Drive path stalls (Drive FS events in the Windows event log) | Render to a local dir, copy to `Sharable\` after |
+| Long render killed repeatedly, no progress | Writing straight to the Google Drive path stalls (Drive FS events in the Windows event log) | Render to a local dir, copy to `Share\` after |
 | Clip too long to render in one run | ~37x realtime means >15s of footage blows a 10-min timeout | `scripts/seg_render.py`, rerun until `DONE` |
 | Exported clip over 50MB | One global CRF can't fit both long and short clips; size varies ~5x with motion | Per-clip CRF (Step 4 table); re-measure, don't extrapolate the +6-CRF rule |
 | `telegram-post` times out mid-upload | `request_timeout_seconds` covers the whole upload | Default is now 900s; raise via `SOCCER_HL__TELEGRAM__REQUEST_TIMEOUT_SECONDS`, post in small batches |

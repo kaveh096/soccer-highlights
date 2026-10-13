@@ -147,9 +147,9 @@ for profile in \
   ; do
   read tag prompt model fps extra <<< "$profile"
   PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe .claude/skills/kaveh_soccer_highlights/scripts/sweep_prompt.py \
-    --candidates-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Tests/pre_label/candidates" \
+    --review-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Review" \
     --review-sheet "G:/.../review_sheet_copy.csv" \
-    --out-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Tests/pre_label/sweep_results" \
+    --out-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Review/sweep_results" \
     --tag "$tag" --prompt "$prompt" --model "$model" --fps "$fps" $extra
 done
 ```
@@ -174,9 +174,9 @@ that as the "baseline" from the sheet directly, free.
 
 ```bash
 ./.venv/Scripts/python.exe .claude/skills/kaveh_soccer_highlights/scripts/analyze_sweep.py \
-  --candidates-dir "G:/.../Tests/pre_label/candidates" \
+  --review-dir "G:/.../<date>/Review" \
   --review-sheet "G:/.../review_sheet_copy.csv" \
-  --sweep-dir "G:/.../Tests/pre_label/sweep_results" \
+  --sweep-dir "G:/.../<date>/Review/sweep_results" \
   --spot-check clip_012,clip_034
 ```
 Prints P/R/F1 per profile (score>=4 vs verdict>=4), which profiles ever award
@@ -257,12 +257,14 @@ labels themselves are noisy or the definition of "highlight-worthy" has
 drifted, not when you're just trying to improve raw score-vs-verdict
 agreement (that's Part B above).
 ```bash
-SOCCER_HL__LABEL_AUDIT__REVIEW_ROOT="G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Tests/pre_label" \
+SOCCER_HL__LABEL_AUDIT__REVIEW_ROOT="G:/My Drive/Photos and Movies/Sunday Soccer/<date>" \
   ./.venv/Scripts/python.exe -m soccer_highlights.cli label-audit [--limit N]
 ```
 (`review_root` has no dedicated CLI flag, only the `SOCCER_HL__LABEL_AUDIT__REVIEW_ROOT`
-env var or a `--config` file override -- point it at the parent of `candidates/`,
-since `load_review_rows` globs `<review_root>/*/review_sheet.csv` and `pre-label`'s
-`candidates/review_sheet.csv` matches that shape directly. Requires both
+env var or a `--config` file override -- point it at the game's `<date>` folder
+(the parent of `Review\`), since `load_review_rows` globs
+`<review_root>/*/review_sheet.csv` and `Review\review_sheet.csv` matches that
+shape directly. For a game before 2026-10-11 point it at `Tests\pre_label`
+instead, the parent of `candidates\`. Requires both
 `GEMINI_API_KEY` and `ANTHROPIC_API_KEY` -- unlike the rest of this pipeline,
 this command's judge step uses Claude.)

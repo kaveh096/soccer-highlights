@@ -678,6 +678,19 @@ def cmd_label_audit(cfg: Config, limit: int | None) -> None:
     print(f"Wrote {len(flagged)} flagged clip(s) to {clips_dir}")
 
 
+def review_dir_for(out_dir: str | Path) -> Path:
+    """The folder pre-label writes into: ``out_dir`` itself, created if missing.
+
+    Flat by design (2026-10-12): a game's ``Review\\`` folder holds the
+    rank-named clips, review_sheet.csv, events.json, descriptions_cache.json and
+    DECREMENTS_PENDING.txt side by side. Before that pre-label nested them under
+    ``<out_dir>/candidates``; games from before 2026-10-11 keep that layout and
+    stay usable because every later command takes explicit paths."""
+    path = Path(out_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def cmd_pre_label(
     cfg: Config,
     out_dir: str,
@@ -828,8 +841,7 @@ def cmd_pre_label(
                 where = "before it starts" if o.distance_seconds < 0 else "after it ends"
                 print(f"    seq={o.mark.mark.sequence:>3} {o.mark.mark.category:<10} {abs(o.distance_seconds):.1f}s {where}")
 
-    strategy_dir = Path(out_dir) / "candidates"
-    strategy_dir.mkdir(parents=True, exist_ok=True)
+    strategy_dir = review_dir_for(out_dir)
     write_events_json(merged, strategy_dir / "events.json")
 
     # A durable, hard-to-miss gate -- a console warning alone wasn't enough
@@ -967,7 +979,7 @@ def _wall_clock_tag(global_seconds: float, chunks: list[Chunk]) -> str:
     return stamp.strftime("%I%M%p").lower().replace("am", "a").replace("pm", "p").lstrip("0")
 
 
-def cmd_name_candidates(cfg: Config, candidates_dir: str, revert: bool = False) -> None:
+def cmd_name_candidates(cfg: Config, review_dir: str, revert: bool = False) -> None:
     """Rename pre-label candidate clips to ``r01_s4_746a_c002.mp4`` -- review
     rank, Gemini score, wall-clock time, canonical id -- so the folder's
     default A-Z sort *is* the review order (best first, chronological within a
@@ -985,7 +997,7 @@ def cmd_name_candidates(cfg: Config, candidates_dir: str, revert: bool = False) 
     run before re-running pre-label over an already-renamed folder -- pre-label
     re-renders to canonical names and would otherwise leave both namings side
     by side and trip the cache mismatch check."""
-    candidates_path = Path(candidates_dir)
+    candidates_path = Path(review_dir)
     sheet_path = candidates_path / "review_sheet.csv"
     cache_path = candidates_path / "descriptions_cache.json"
     if not sheet_path.exists():
@@ -1400,7 +1412,9 @@ def main() -> None:
         "description for each, and write a fillable review_sheet.csv (+events.json) for a first labeling pass",
     )
     pre_label_parser.add_argument(
-        "--out-dir", required=True, help="Where to write events.json/clips/review_sheet.csv, e.g. a game's Tests folder"
+        "--out-dir",
+        required=True,
+        help="Where to write events.json/clips/review_sheet.csv, flat -- the game's Review\\ folder",
     )
     pre_label_parser.add_argument(
         "--fps",
@@ -1448,7 +1462,12 @@ def main() -> None:
         "default sort is the review order; updates review_sheet.csv + descriptions_cache.json to match",
     )
     name_candidates_parser.add_argument(
-        "--candidates-dir", required=True, help="The pre_label candidates/ folder to rename in place"
+        "--review-dir",
+        "--candidates-dir",  # deprecated alias, pre-2026-10-12 spelling
+        dest="review_dir",
+        required=True,
+        help="The game's Review\\ folder (pre-label's --out-dir) to rename in place. --candidates-dir is a "
+        "deprecated alias; for pre-2026-10-11 games point this at Tests\\pre_label\\candidates",
     )
     name_candidates_parser.add_argument(
         "--revert",
@@ -1563,7 +1582,7 @@ def main() -> None:
             args.near_cam_team_first_half,
         )
     elif args.command == "name-candidates":
-        cmd_name_candidates(cfg, args.candidates_dir, args.revert)
+        cmd_name_candidates(cfg, args.review_dir, args.revert)
     elif args.command == "ingest-marks":
         if bool(args.marks_csv) == bool(args.tally_csv):
             raise SystemExit("Pass exactly one of --marks-csv or --tally-csv")

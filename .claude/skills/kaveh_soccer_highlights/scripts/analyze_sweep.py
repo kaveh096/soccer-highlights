@@ -12,13 +12,14 @@ every profile side by side, and writes a full per-clip comparison CSV.
 Usage:
 
   ./.venv/Scripts/python.exe .claude/skills/kaveh_soccer_highlights/scripts/analyze_sweep.py \
-      --candidates-dir "G:/.../Tests/pre_label/candidates" \
-      --sweep-dir "G:/.../Tests/pre_label/sweep_results" \
+      --review-dir "G:/.../<date>/Review" \
+      --sweep-dir "G:/.../<date>/Review/sweep_results" \
       [--review-sheet path/to/review_sheet.csv] \
       [--spot-check clip_012,clip_034]
 
-sweep-dir defaults to candidates-dir if omitted (sweep_prompt.py's --out-dir can
-point at either).
+sweep-dir defaults to review-dir if omitted (sweep_prompt.py's --out-dir can
+point at either). --candidates-dir is the old spelling of --review-dir and still
+works; for games before 2026-10-11 point it at Tests\\pre_label\\candidates.
 """
 
 from __future__ import annotations
@@ -41,9 +42,15 @@ def prf(pred_scores: list[int], verdicts: list[int]) -> tuple[float, float, floa
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--candidates-dir", required=True)
-    parser.add_argument("--review-sheet", default=None, help="Default: <candidates-dir>/review_sheet.csv")
-    parser.add_argument("--sweep-dir", default=None, help="Where describe_cache_<tag>.json files live. Default: candidates-dir")
+    parser.add_argument(
+        "--review-dir",
+        "--candidates-dir",  # deprecated alias, pre-2026-10-12 spelling
+        dest="candidates_dir",
+        required=True,
+        help="The game's Review folder (holds review_sheet.csv)",
+    )
+    parser.add_argument("--review-sheet", default=None, help="Default: <review-dir>/review_sheet.csv")
+    parser.add_argument("--sweep-dir", default=None, help="Where describe_cache_<tag>.json files live. Default: review-dir")
     parser.add_argument("--spot-check", default=None, help="Comma-separated clip_file stems (no .mp4) to print side-by-side across profiles")
     parser.add_argument("--out-csv", default=None, help="Default: <sweep-dir>/sweep_comparison.csv")
     args = parser.parse_args()

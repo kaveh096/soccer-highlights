@@ -212,6 +212,19 @@ marks) -> posted to a Telegram group with the Farsi caption.
   found, a first half that disagrees with itself, or no swap at halftime all
   return no suggestion, and the contact sheet is the human gate. Don't turn
   it into an unattended input to `pre-label`.
+- **A game folder has exactly three subfolders: `Raw\`, `Review\`, `Share\`**
+  (Kaveh's call, 2026-10-12; first used for the Oct-11 game). Named after what
+  you *do* in them: `Raw\` = inputs (card MP4/LRF + `tally_*.csv`), `Review\`
+  = everything `pre-label` writes and a human picks from -- FLAT (rank-named
+  clips, `review_sheet.csv`, `post_sheet.csv`, `events.json`,
+  `descriptions_cache.json`, `DECREMENTS_PENDING.txt`, `gsNN_` goal-search
+  clips), `Share\` = everything posted -- FLAT (exported clips,
+  `timelapse_final.mp4`, `.telegram_sent.json`). This replaces
+  `Tests\pre_label\candidates\`, `Tests\goal_search\` and `Sharable\`. Games
+  before 2026-10-11 keep the old layout; every command takes explicit paths, so
+  they still work (`--review-dir` just points at the old `candidates\`).
+  Metadata filenames were deliberately NOT renamed. `sweep_results\` is the one
+  eval-only subfolder, and only exists on a prompt-tuning run.
 - **A decrement (Tallies' minus button) is NOT auto-resolved as an undo**
   (changed 2026-09-07 in `load_tallies_csv`, after Sep-06 showed a decrement
   landing 2.5 minutes after the press it was meant to cancel, with no
@@ -231,7 +244,7 @@ marks) -> posted to a Telegram group with the Farsi caption.
   "I'll figure out which ones later" silently ship as the displayed number.
   **A console warning alone wasn't enough** (that's exactly what Sep-06 had,
   and it still got missed) -- as of 2026-09-08, `pre-label` also writes
-  `candidates/DECREMENTS_PENDING.txt` (self-clearing on a rerun with
+  `Review\DECREMENTS_PENDING.txt` (self-clearing on a rerun with
   nothing pending) whenever this applies, and `ingest-marks` prints the
   same `***`-bracketed summary before any render. Treat that file's
   existence as a hard stop: ask Kaveh which press(es) each decrement cancels

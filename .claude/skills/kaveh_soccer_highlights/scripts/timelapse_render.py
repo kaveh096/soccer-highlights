@@ -48,6 +48,9 @@ Rerun the identical command to resume after an interruption -- already-
 rendered chunk pieces are skipped. Once `timelapse_master.mp4` exists,
 rerun with `--audio-start-seconds`/`--crf` to retune the final mux without
 redoing any of the expensive per-chunk work.
+
+The finished `timelapse_final.mp4` stays in the local --out-dir; copy it into the
+game's flat `Share\\` folder on Drive (next to the exported clips) before posting.
 """
 
 from __future__ import annotations

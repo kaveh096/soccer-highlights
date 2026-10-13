@@ -46,7 +46,8 @@ How it works:
   * --render-top N cuts review clips (~12s before to ~10s after, 1280px,
     30fps, crf 23, veryfast, stereo AAC) of the top N candidates as
     `gsNN_<hhmmss>_g<globalsecond>.mp4` into <out-dir>/review, then copies
-    them to --review-dir (the game's `Tests\\goal_search\\` on Drive).
+    them to --review-dir (the game's flat `Review\\` folder on Drive, next to
+    review_sheet.csv -- the `gs` prefix keeps them apart from the `rNN_` clips).
     Rendering stays local first for the same Drive-write-stall reason as
     seg_render.py.
 
@@ -74,7 +75,7 @@ processing.md Part 1):
       --start-seconds 0 --end-seconds 660 \\
       --camera-note "camera behind white's goal in the first half, black attacks the near goal" \\
       --out-dir "C:/local/scratch/goal_search_<date>" \\
-      [--far-crop] [--render-top 4 --review-dir "G:/.../<date>/Tests/goal_search"]
+      [--far-crop] [--render-top 4 --review-dir "G:/.../<date>/Review"]
 """
 
 from __future__ import annotations
@@ -480,7 +481,7 @@ def main() -> None:
     )
     parser.add_argument("--render-top", type=int, default=0, help="Cut review clips for the top N candidates")
     parser.add_argument(
-        "--review-dir", help="Where review clips are copied after rendering locally (the game's Tests/goal_search)"
+        "--review-dir", help="Where review clips are copied after rendering locally (the game's flat Review folder)"
     )
     args = parser.parse_args()
 
