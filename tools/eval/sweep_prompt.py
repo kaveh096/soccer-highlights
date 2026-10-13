@@ -5,15 +5,15 @@ work -- rerun the exact same command and only the failed rows retry.
 
 This is the generalized, reusable version of the ad-hoc sweep script written
 2026-07-31 to compare v1 vs v2 prompt wording x {flash, pro} x {5fps, 10fps}
-against the Jul-26 game's 66 hand-labeled clips (see ../evals.md for that
-sweep's actual results and what they mean). A full multi-profile sweep is just
+against the Jul-26 game's 66 hand-labeled clips (see docs/eval-and-labeling.md for
+that sweep's actual results and what they mean). A full multi-profile sweep is just
 this script invoked once per profile with a different --tag/--model/--fps/
 --prompt -- deliberately not a single script with a hardcoded profile list, so
 adding a new profile to compare needs zero code edits, just a new invocation.
 
 Usage (run from repo root, with the project venv):
 
-  ./.venv/Scripts/python.exe .claude/skills/kaveh_soccer_highlights/scripts/sweep_prompt.py \
+  ./.venv/Scripts/python.exe tools/eval/sweep_prompt.py \
       --review-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Review" \
       --out-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Review/sweep_results" \
       --tag v2_flash_10fps --prompt v2 --model gemini-flash-latest --fps 10 --schema

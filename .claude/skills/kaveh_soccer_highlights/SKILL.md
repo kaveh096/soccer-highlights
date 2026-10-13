@@ -1,6 +1,6 @@
 ---
 name: kaveh_soccer_highlights
-description: Kaveh's end-to-end pipeline for turning Sunday-morning recreational soccer recordings into a shared Telegram highlight reel (audio detection -> Gemini scoring -> manual pick -> export -> post), plus the eval/tuning methodology for both audio-detection parameters and the Gemini scoring prompt. Use whenever Kaveh mentions Sunday soccer, highlight clips, the review sheet, Gemini scoring/describe, or posting highlights to Telegram.
+description: Kaveh's end-to-end pipeline for turning Sunday-morning recreational soccer recordings into a shared Telegram highlight reel (audio detection -> Gemini scoring -> manual pick -> export -> post). Use whenever Kaveh mentions Sunday soccer, highlight clips, the review sheet, Gemini scoring/describe, or posting highlights to Telegram.
 ---
 
 # Kaveh's Sunday Soccer Highlights pipeline
@@ -12,19 +12,11 @@ one setup. It exists so a fresh Claude Code session can pick up the recurring we
 workflow cold, without re-deriving decisions already made and validated over several
 prior sessions.
 
-**Two sections:**
-- **[processing.md](processing.md)** -- the actual weekly pipeline: one-time setup
-  (already done, reference only) + the recurring flow from raw recording to posted
-  Telegram clips, with exact commands and folder structure.
-- **[evals.md](evals.md)** -- how to tune this system when something needs
-  improving: audio-detection parameters (rarely needed, mostly settled) and the
-  Gemini scoring prompt (more likely to need revisiting as new games surface new
-  edge cases).
+**[processing.md](processing.md)** is the actual weekly pipeline: one-time setup
+(already done, reference only) + the recurring flow from raw recording to posted
+Telegram clips, with exact commands and folder structure.
 
-**`scripts/`** holds five promoted, reusable helpers. Know which is which:
-- `sweep_prompt.py` / `analyze_sweep.py` -- **eval only** (evals.md Part B). Run
-  one Gemini describe profile over a labeled sheet, then compare profiles by
-  P/R/F1. Not part of a normal weekly run.
+**`scripts/`** holds three promoted, reusable helpers. Know which is which:
 - `seg_render.py` -- **weekly workflow** (processing.md Step 4). Exports one
   share-quality clip in resumable segments, for clips too long to finish in a
   single run on this laptop. Reach for it whenever a pick is longer than ~15s.
@@ -61,16 +53,15 @@ marks) -> posted to a Telegram group with the Farsi caption.
 
 ## Settled decisions -- don't re-litigate without new evidence
 
-- **Audio detection**: `onset_flux` strategy, tuned via `golden-score` against
-  `testdata/golden_events.json` (Round 3/4 in README). Rarely worth touching.
-- **Vision provider split**: Gemini native video for the describe/score pass
-  (`generate_description` in `label_audit.py`), Claude for the label-audit judge
-  step. Both in active use for different jobs. Don't re-propose GPT-4o/AWS
+- **Audio detection**: `onset_flux` strategy (Round 3/4 in README). Settled;
+  rarely worth touching.
+- **Vision provider**: Gemini native video for the describe/score pass
+  (`generate_description` in `label_audit.py`). Don't re-propose GPT-4o/AWS
   Rekognition/Google Video Intelligence -- already considered and rejected (README).
 - **Two separate Gemini/vision code paths exist -- know which one is live:**
   - `label_audit.py`'s `generate_description` / `_DESCRIBE_PROMPT_V2` -- **this is
-    the live, production path.** Used by `pre-label` and `label-audit`. This is
-    what the whole weekly workflow runs on.
+    the live, production path.** Used by `pre-label`. This is what the whole
+    weekly workflow runs on.
   - `vision.py` / `vision_gemini.py`'s `classify_confirm` (Rounds 1-4 experiment,
     `vision-highlights`/`vision-compare` commands) -- **concluded, not part of the
     weekly workflow.** Gemini won that comparison (F1 0.432) but was never wired
@@ -118,20 +109,16 @@ marks) -> posted to a Telegram group with the Farsi caption.
   deliberately stay clean. Don't add a re-encode step after export to overlay a
   timestamp: that would cost a second full generation loss on this laptop's
   slowest path for something the export encode already does for free.
-- **Most weeks are "quick share," not "full eval" -- don't assume `verdict`/
-  `notes` get filled in.** The common case is posting highlights soon after
-  the game, picking clips straight off `gemini_score` + `gemini_description`
-  with the `verdict`/`notes` columns left blank -- that labeling pass is only
-  needed later, occasionally, when actually tuning the prompt (evals.md Part
-  B). See processing.md Part 3's mode note. Don't treat an unlabeled
+- **The weekly flow is "quick share": `verdict`/`notes` stay blank.** Kaveh
+  posts highlights soon after the game, picking clips straight off
+  `gemini_score` + `gemini_description`. Don't treat an unlabeled
   `review_sheet.csv` as unfinished or broken, and don't assume a sheet with
-  posted clips already has ground-truth verdicts in it.
+  posted clips has ground-truth verdicts in it.
 - **`_DESCRIBE_PROMPT_V2` / `gemini-flash-latest` / fps=10 / schema-enforced JSON**
   is the current production default (`generate_description`'s defaults, set
-  2026-07-31) -- validated via a 4-profile sweep against 66 real hand-labeled
-  clips, F1 0.364 -> 0.545. **Pro model (`gemini-pro-latest`) was a clear
-  regression** (F1 as low as 0.000) -- it doesn't even perceive the same clear
-  goals flash does. Don't switch to pro without new evidence.
+  2026-07-31, validated against 66 hand-labeled clips). **Pro model
+  (`gemini-pro-latest`) was a clear regression** -- it doesn't even perceive the
+  same clear goals flash does. Don't switch to pro without new evidence.
 - **Live tagging (watch marks) is part of the weekly flow as of 2026-09-06.**
   Kaveh wears a Pixel Watch running **Tallies** with three counters --
   `white goal`, `black goal`, `moment` -- and taps during the game, because
@@ -223,8 +210,7 @@ marks) -> posted to a Telegram group with the Farsi caption.
   `Tests\pre_label\candidates\`, `Tests\goal_search\` and `Sharable\`. Games
   before 2026-10-11 keep the old layout; every command takes explicit paths, so
   they still work (`--review-dir` just points at the old `candidates\`).
-  Metadata filenames were deliberately NOT renamed. `sweep_results\` is the one
-  eval-only subfolder, and only exists on a prompt-tuning run.
+  Metadata filenames were deliberately NOT renamed.
 - **A decrement (Tallies' minus button) is NOT auto-resolved as an undo**
   (changed 2026-09-07 in `load_tallies_csv`, after Sep-06 showed a decrement
   landing 2.5 minutes after the press it was meant to cancel, with no
@@ -278,11 +264,10 @@ marks) -> posted to a Telegram group with the Farsi caption.
 - **Recall-first.** Throughout audio tuning and vision work, the standing priority
   is "don't miss real events" over "don't bombard with false positives." A change
   that only cuts precision at the cost of recall is not obviously a net win.
-- **Two known, still-open Gemini scoring gaps** (see evals.md's Gemini-prompt
-  history for detail) -- don't assume these are fixed:
-  - Tier 5 (skillful goal) has never been awarded by any profile tested so far,
-    including the one real 5-worthy clip in the Jul-26 batch.
-  - The keeper-save tier-3 wording fix only worked ~1 in 12 times it should have.
+- **Read Gemini's score as a sort key, not a verdict.** It has never awarded a 5
+  for a genuinely skillful goal, under-scores some keeper saves, and has missed
+  the odd real goal (and overcalled non-goals) -- which is why picks are
+  eyeballed and taps outrank it for goals.
 
 ## Home-setup specifics worth knowing up front
 

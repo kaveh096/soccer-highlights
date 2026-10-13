@@ -11,7 +11,7 @@ every profile side by side, and writes a full per-clip comparison CSV.
 
 Usage:
 
-  ./.venv/Scripts/python.exe .claude/skills/kaveh_soccer_highlights/scripts/analyze_sweep.py \
+  ./.venv/Scripts/python.exe tools/eval/analyze_sweep.py \
       --review-dir "G:/.../<date>/Review" \
       --sweep-dir "G:/.../<date>/Review/sweep_results" \
       [--review-sheet path/to/review_sheet.csv] \

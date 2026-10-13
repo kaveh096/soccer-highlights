@@ -112,14 +112,14 @@ G:\My Drive\Photos and Movies\Sunday Soccer\<date>\
   Review\                           FLAT -- everything you look at to decide
     clip_001.mp4 ... clip_NNN.mp4     review-quality renders (1280px/30fps/
                                        crf23/veryfast/stereo, from .LRF) --
-                                       the SAME file a human watches, Gemini
-                                       scores, and label-audit later re-checks.
+                                       the SAME file a human watches and Gemini
+                                       scores.
                                        After Step 1b they are r01_s5_..._c032.mp4
     review_sheet.csv                  clip_file/start/end/duration/max_peak_score/
                                        verdict/notes/source/gemini_score/
                                        gemini_caption/gemini_description --
-                                       verdict/notes start blank, fill them in
-                                       during Part 3 Step 2. `source` is only
+                                       verdict/notes stay blank (unused in the
+                                       weekly flow). `source` is only
                                        meaningful on a watch-tagged game (Step 0b)
     post_sheet.csv                    derived pick sheet (Step 4b), only if needed
     events.json                       raw detected intervals
@@ -137,8 +137,6 @@ G:\My Drive\Photos and Movies\Sunday Soccer\<date>\
 Three folders, named for what you do in them (2026-10-12): `Raw\` in, `Review\`
 decide, `Share\` post. `pre-label --out-dir` IS the `Review\` folder -- it writes
 flat into it, no `candidates\` subfolder. The metadata filenames are unchanged.
-The only extra subfolder is `Review\sweep_results\`, and only on an evals.md
-Part B prompt-tuning run.
 
 **Games before 2026-10-11 use the old layout** -- `Tests\pre_label\candidates\`
 (where `Review\` now is), `Tests\goal_search\` and `Sharable\` (where `Share\`
@@ -155,28 +153,13 @@ paths that no longer exist.
 
 ## Part 3: The recurring weekly workflow
 
-**Two modes -- most weeks are "quick share," not "full eval."** Steps 0/1/1b
-(detect + render + Gemini describe/score, rename), plus Step 1c's
-tap-vs-Gemini check on a watch-tagged game, are always run the same way.
-Steps 2/3 (deciding the final picks) branch:
-
-- **Quick share (the common case)**: Kaveh watches clips soon after the game
-  to post highlights fast. He picks `clip_file`s to export/post directly off
-  the ranked sheet -- `gemini_score` plus a quick skim of `gemini_description`
-  is enough to decide. **`verdict`/`notes` are left blank**, deliberately --
-  filling them out is the time-consuming part and isn't needed just to post
-  clips. Skip straight to Step 3/4/5 below.
-- **Full eval (occasional, later)**: only when actually tuning the Gemini
-  prompt or re-checking detection recall (evals.md Part B) does the
-  `verdict`/`notes` column need to be filled in for every row -- that's what
-  turns a game's sheet into labeled ground truth for a P/R/F1 sweep. This can
-  happen well after the game, on the same `review_sheet.csv`, as a separate
-  pass -- it doesn't have to happen before clips get posted, and most weeks
-  it doesn't happen at all.
-
-Don't assume a given week's `review_sheet.csv` has verdicts filled in just
-because clips already got posted -- check before treating a sheet as eval-
-ready ground truth for evals.md Part B.
+**The weekly flow is "quick share."** Steps 0/1/1b (detect + render + Gemini
+describe/score, rename), Step 1c's tap-vs-Gemini check on a watch-tagged game,
+then Kaveh watches clips soon after the game and picks `clip_file`s to
+export/post straight off the ranked sheet -- `gemini_score` plus a quick skim of
+`gemini_description` is enough to decide. **`verdict`/`notes` are left blank**,
+deliberately; don't treat an unlabeled `review_sheet.csv` as unfinished, and
+don't assume a sheet with posted clips has ground-truth verdicts in it.
 
 ### Step 0 -- get footage onto Drive (AFTER the heavy jobs, not before)
 
@@ -427,7 +410,7 @@ Gemini describe call per clip (`_DESCRIBE_PROMPT_V2`, `gemini-flash-latest`,
 fps=10, schema-enforced JSON -- current production default, see SKILL.md's
 settled-decisions list) -> writes `review_sheet.csv` with `gemini_score` (1-5),
 `gemini_caption` (Farsi), `gemini_description` (English) filled in, `verdict`/
-`notes` left blank for you.
+`notes` left blank (unused).
 
 **Expect this to take a while but not forever**: LRF-based review renders run
 ~0.33x realtime on this laptop -- a full game's worth of candidates (60-70 clips)
@@ -765,32 +748,22 @@ Step 4b) and export/post it like any other pick. The Oct-04 recipe:
   (`ffmpeg -ss <t> -i clip.mp4 -frames:v 1 out.png`) and check the score
   changes. Pass the same `post_sheet.csv` to `telegram-post` (Step 5).
 
-### Step 2 (optional, full-eval runs only) -- fill in verdict/notes, but DO NOT edit `review_sheet.csv` in Excel
+### Step 2 -- keep the sheet pristine: DO NOT open the CSVs in Excel
 
-**Skip this step for a normal quick-share run** -- see the mode note at the
-top of Part 3. Only do this when the goal is building/refreshing labeled
-ground truth for evals.md Part B.
+No command here, just the standing gotcha that Steps 4b/5/5b keep pointing at.
+`review_sheet.csv` has no BOM (deliberately, so `csv.DictReader(...,
+encoding="utf-8")` reads the header correctly elsewhere in the codebase) -- which
+means **Excel's default save silently mangles the Farsi `gemini_caption` column
+into literal `?` characters**, real byte-level data loss and not a display issue.
+Tally CSVs are vulnerable too: re-saving a raw export from a spreadsheet adds
+thousands separators to the epoch timestamps (Sep-27's `"1,790,529,761,521"`).
 
-Watch the clips in `Review\`, fill in each row's `verdict`
-(same 1-5 highlight-worthiness scale Gemini uses) and `notes` columns. Use
-`gemini_score` to triage which clips to watch first, but **scan the whole
-sheet** -- the score is for sorting, not an automatic filter (see SKILL.md).
-
-**Critical gotcha, already happened once**: `review_sheet.csv` has no BOM
-(deliberately, so `csv.DictReader(..., encoding="utf-8")` reads the header
-correctly elsewhere in the codebase) -- but that also means **Excel's default
-save silently mangles the Farsi `gemini_caption` column into literal `?`
-characters**, not just a display issue, real byte-level data loss on save. If you
-edit in Excel:
-- Work on a **copy** (e.g. `review_sheet_copy.csv`), never the original.
-- When you later need captions for posting (Step 4), **always source them from
-  the original, untouched `review_sheet.csv`**, not whatever copy you edited --
-  `telegram-post`'s `--review-sheet` flag only needs `clip_file`/`gemini_caption`
-  columns, so pointing it at the pristine original is always safe and correct
-  even if verdicts live in a separate edited copy.
-- If Excel mojibake becomes a real recurring annoyance: use Excel's *Data -> From
-  Text/CSV* import with UTF-8 explicitly selected, rather than opening the file
-  directly.
+- Don't open the originals in a spreadsheet. If you must, work on a **copy**
+  (e.g. `review_sheet_copy.csv`) and import it via *Data -> From Text/CSV* with
+  UTF-8 explicitly selected.
+- Always source captions for posting (Step 5) from the original, untouched
+  `review_sheet.csv` (or a `post_sheet.csv` derived from it, Step 4b) --
+  `telegram-post`'s `--review-sheet` only needs `clip_file`/`gemini_caption`.
 
 ### Step 3 -- decide the final picks
 
@@ -798,10 +771,9 @@ No command for this -- read the ranked sheet, watch clips as needed, decide whic
 `clip_file`s are the real highlights. Typically the score>=4 clips plus any
 score-3 clips whose `notes`/`gemini_description` make them worth including (a
 near-miss, a funny moment, etc.) -- gemini_score is a triage aid, not the
-final word. **On a quick-share run this is the actual decision step** (no
-`verdict` column to lean on) -- Kaveh watches the higher-ranked clips
-directly and picks off the ranked order + `gemini_description`/caption text,
-same judgment call as Step 2 would use, just not written back to the sheet.
+final word. **This is the actual decision step** -- Kaveh watches the
+higher-ranked clips directly and picks off the ranked order +
+`gemini_description`/caption text; nothing is written back to the sheet.
 
 ### Step 4 -- export share-quality clips (`export-picks`)
 
@@ -949,7 +921,7 @@ truncated -- but if you produce clips any other way, check them yourself:
 ### Step 4b -- merging two adjacent candidates into one clip
 
 When two candidates are really one moment split in half, don't hand-edit
-`review_sheet.csv` (it's the ground truth for F1 work). Build a small derived
+`review_sheet.csv` (it stays the pristine record of what the pipeline produced). Build a small derived
 **`post_sheet.csv`** next to it with the same `clip_file`/`start_seconds`/
 `end_seconds`/`gemini_caption` columns, one row per final pick, and give the
 merged row the earlier clip's start and the later clip's end -- the gap between

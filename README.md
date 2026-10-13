@@ -545,6 +545,11 @@ iterate further -- see git log.
 
 ### Label audit: is the ground truth itself the bottleneck?
 
+> The step-by-step playbook for redoing this kind of work (labeling a game
+> independently, the prompt sweep, `label-audit`, audio tuning) lives in
+> [`docs/eval-and-labeling.md`](docs/eval-and-labeling.md); the scripts are in
+> [`tools/eval/`](tools/eval/). It is not part of the weekly flow.
+
 Every round above measured against `testdata/golden_events.json`, which
 is itself derived from the Round 2 human-labeled dataset
 (`output/review/*`) via `golden.build_golden_events()` -- a fairly rough
