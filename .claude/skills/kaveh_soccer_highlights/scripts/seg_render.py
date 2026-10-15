@@ -53,8 +53,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import subprocess
 import sys
 from pathlib import Path
+
+_MAX_ATTEMPTS = 3  # per segment, only for hung (timed-out) encodes
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(_REPO_ROOT / "src"))
@@ -141,7 +144,18 @@ def main() -> None:
             break
         seg_path.unlink(missing_ok=True)  # drop a truncated leftover from a killed run
         print(f"Rendering seg {i + 1}/{len(segments)} of {args.clip}: {dur:.2f}s @ crf{args.crf}", flush=True)
-        render._encode_piece(src, start, dur, seg_path, cfg.export, epoch_base, score, clip_offset)
+        # A hung ffmpeg is killed by render.encode_timeout_seconds and retried
+        # here (2026-10-13: one segment hung ~41h unattended; the identical
+        # re-render took 131s).
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            try:
+                render._encode_piece(src, start, dur, seg_path, cfg.export, epoch_base, score, clip_offset)
+                break
+            except subprocess.TimeoutExpired:
+                seg_path.unlink(missing_ok=True)
+                print(f"seg {i + 1} timed out (attempt {attempt}/{_MAX_ATTEMPTS})", flush=True)
+                if attempt == _MAX_ATTEMPTS:
+                    raise SystemExit(f"segment {i} hung {_MAX_ATTEMPTS} times -- investigate the source window")
         if not render.is_playable(seg_path):
             raise SystemExit(f"segment {i} came out unplayable -- rerun to retry it")
         rendered += 1

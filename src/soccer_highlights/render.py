@@ -193,8 +193,24 @@ def _score_filters(
     ]
 
 
-def _run_ffmpeg(args: list[str]) -> None:
-    subprocess.run(["ffmpeg", "-v", "error", "-y", *args], check=True)
+def _run_ffmpeg(args: list[str], timeout: float | None = None) -> None:
+    """Run ffmpeg to completion. `timeout` (seconds) kills a hung encode and
+    raises subprocess.TimeoutExpired instead of waiting forever -- see
+    `encode_timeout_seconds`."""
+    subprocess.run(["ffmpeg", "-v", "error", "-y", *args], check=True, timeout=timeout)
+
+
+def encode_timeout_seconds(duration: float) -> float:
+    """Generous wall-clock cap for encoding `duration` seconds of footage.
+
+    2026-10-13: one segment's ffmpeg hung for ~41 hours (0 bytes out, 3 cores
+    spinning, a demux "Invalid argument" in stderr) and stalled the whole
+    export batch; the same segment re-rendered in 131s. Real encodes here
+    run ~40x realtime, i.e. up to ~43s of wall clock per footage second at
+    the slowest seen (851s for a 20s clip), so 120s per footage second with
+    a 15 min floor is ~3x slower than anything observed and still turns a
+    hang into a retry within the hour."""
+    return max(900.0, duration * 120.0)
 
 
 def is_playable(path: Path) -> bool:
@@ -303,7 +319,8 @@ def _encode_piece(
                 "-t", f"{duration:.3f}",
                 *encode_args,
                 str(out_path),
-            ]
+            ],
+            timeout=encode_timeout_seconds(duration),
         )
         return
 
@@ -318,7 +335,8 @@ def _encode_piece(
             "-vf", video_filter,
             *encode_args,
             str(out_path),
-        ]
+        ],
+        timeout=encode_timeout_seconds(duration),
     )
 
 
