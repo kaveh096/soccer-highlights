@@ -8,6 +8,7 @@ from soccer_highlights.discovery import Chunk
 from soccer_highlights.marks import (
     RECORDING_TZ,
     Mark,
+    ResolvedMark,
     extend_for_score_flip,
     load_marks_csv,
     load_tallies_csv,
@@ -17,6 +18,9 @@ from soccer_highlights.marks import (
     resolve_undos,
     is_near_cam_goal,
     marks_outside_their_clip,
+    near_cam_flag,
+    slomo_center_seconds,
+    sync_clap_flags,
     review_sort_key,
     review_tier,
     tap_claim,
@@ -683,3 +687,96 @@ def test_undone_goal_never_reaches_the_score():
     resolved = resolve_marks(resolve_undos(marks), chunks, [], MarksConfig(), TimelineConfig())
 
     assert score_events(resolved) == []
+
+
+# --- center camera tiering / --no-sync-clap / slomo_center_s (2026-10-18) ---
+
+
+def _owner(category: str, global_seconds: float | None, peak_time: float | None = None) -> ResolvedMark:
+    """A resolved mark; `peak_time` set = it snapped to that audio peak."""
+    mark = Mark(sequence=1, timestamp=_local(2026, 10, 18, 9, 53, 40), category=category)
+    if global_seconds is None:
+        return ResolvedMark(mark=mark, global_seconds=None, interval=None, anchor="unrecorded_gap")
+    peaks = [GlobalPeak(time_seconds=peak_time, score=1.0)] if peak_time is not None else []
+    interval = Interval(start_seconds=global_seconds - 10, end_seconds=global_seconds + 5, peaks=peaks)
+    return ResolvedMark(mark=mark, global_seconds=global_seconds, interval=interval,
+                        anchor="audio_peak" if peak_time is not None else "fixed_window")
+
+
+def test_center_camera_makes_every_goal_tap_tier_1_even_when_gemini_says_no_goal():
+    for category in ("white_goal", "black_goal"):
+        flag = near_cam_flag(_owner(category, 500.0), "center", halftime_seconds=None, near_cam_team_first_half=None)
+        assert flag is True
+        assert review_tier(category, gemini_score=2, goal_this_end=False, is_near_cam_goal=flag) == 1
+    # sort key: a center-cam goal tap outranks a score-5 untapped clip
+    goal = review_sort_key("white_goal", 2, False, 900.0, is_near_cam_goal=True)
+    other = review_sort_key("", 5, False, 100.0)
+    assert goal < other
+
+
+def test_center_camera_flag_is_none_for_non_goal_candidates():
+    assert near_cam_flag(_owner("moment", 500.0), "center", None, None) is None
+    assert near_cam_flag(None, "center", None, None) is None
+    assert near_cam_flag(_owner("white_goal", None), "center", None, None) is None  # unrecorded gap
+
+
+def test_end_camera_flag_is_unchanged():
+    # Camera captures white's shots in H1 (halftime 1000): a white goal at 500 is near, a black one is not.
+    assert near_cam_flag(_owner("white_goal", 500.0), "end", 1000.0, "white") is True
+    assert near_cam_flag(_owner("black_goal", 500.0), "end", 1000.0, "white") is False
+    assert near_cam_flag(_owner("white_goal", 1500.0), "end", 1000.0, "white") is False  # swapped after half
+    # incomplete config -> None (fall back to goal_this_end), not False
+    assert near_cam_flag(_owner("white_goal", 500.0), "end", None, "white") is None
+    assert near_cam_flag(_owner("white_goal", 500.0), "end", 1000.0, None) is None
+
+
+def test_sync_clap_flags_marks_only_the_chronologically_first_moment():
+    owners = [_owner("moment", 900.0), None, _owner("moment", 300.0), _owner("white_goal", 100.0)]
+    assert sync_clap_flags(owners) == [False, False, True, False]
+
+
+def test_no_sync_clap_marks_nothing_so_the_first_moment_keeps_its_boost():
+    owners = [_owner("moment", 900.0), _owner("moment", 300.0)]
+    flags = sync_clap_flags(owners, enabled=False)
+    assert flags == [False, False]
+    assert review_tier("moment", 3, False, is_sync_clap=flags[1]) == 2
+    assert review_tier("moment", 3, False, is_sync_clap=True) == 5  # what the clap flag would have cost it
+
+
+def test_slomo_center_uses_the_strongest_audio_peak_relative_to_clip_start():
+    iv = Interval(start_seconds=100.0, end_seconds=120.0,
+                  peaks=[GlobalPeak(105.0, score=0.6), GlobalPeak(112.34, score=0.9)])
+    assert slomo_center_seconds(iv, "audio", None) == 12.3
+
+
+def test_slomo_center_uses_the_peak_a_both_mark_snapped_to_not_the_loudest():
+    iv = Interval(start_seconds=100.0, end_seconds=120.0,
+                  peaks=[GlobalPeak(105.0, score=0.6), GlobalPeak(112.0, score=0.9)])
+    owner = _owner("white_goal", 108.0, peak_time=105.0)
+    assert slomo_center_seconds(iv, "both", owner) == 5.0
+
+
+def test_slomo_center_falls_back_to_tap_minus_3_when_audio_found_no_peak():
+    iv = Interval(start_seconds=200.0, end_seconds=220.0)  # fixed-window clip: no peaks
+    assert slomo_center_seconds(iv, "mark", _owner("black_goal", 212.0)) == 9.0 - 0.0  # 212 - 3 - 200 = 9
+    assert slomo_center_seconds(iv, "mark", _owner("black_goal", 212.0), tap_lead_seconds=2.0) == 10.0
+
+
+def test_slomo_center_is_clamped_into_the_clip_and_none_without_any_anchor():
+    iv = Interval(start_seconds=200.0, end_seconds=220.0)
+    assert slomo_center_seconds(iv, "mark", _owner("black_goal", 201.0)) == 0.0  # 198 -> before the clip
+    assert slomo_center_seconds(iv, "mark", _owner("black_goal", 260.0)) == 20.0  # 257 -> past the end
+    assert slomo_center_seconds(iv, "mark", None) is None
+    assert slomo_center_seconds(iv, "mark", _owner("white_goal", None)) is None
+
+
+def test_slomo_center_is_relative_to_start_even_after_the_clip_was_extended_for_the_score_flip():
+    """extend_for_score_flip only moves end_seconds, so start (== the rendered clip's
+    t=0) -- and therefore every clip-relative time -- is unchanged by it."""
+    peak = GlobalPeak(150.0, score=1.0)
+    iv = Interval(start_seconds=141.0, end_seconds=155.0, peaks=[peak])
+    owner = _owner("white_goal", 158.0, peak_time=150.0)
+    before = slomo_center_seconds(iv, "both", owner)
+    extend_for_score_flip([(iv, "both", owner)], MarksConfig(score_flip_cap_seconds=30.0, score_flip_tail_seconds=3.0))
+    assert iv.end_seconds == 161.0 and iv.start_seconds == 141.0
+    assert slomo_center_seconds(iv, "both", owner) == before == 9.0

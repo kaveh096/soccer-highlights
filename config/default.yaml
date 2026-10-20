@@ -98,3 +98,29 @@ review:
   audio_bitrate_kbps: 128
   max_negative_clip_seconds: 120.0
   min_negative_clip_seconds: 8.0
+
+crop:
+  # Action-region crop window as frame fractions (2026-10-18). 2/3 x 2/3 of the
+  # 3840x2160 source = 2560x1440 (1.5x crop, no upscale). Shared by the review
+  # overlay's box outline and export's crop -- see soccer_highlights/crop.py.
+  width_fraction: 0.6666666666666666
+  height_fraction: 0.6666666666666666
+  y_center: 0.5
+
+review_overlay:
+  # Burned into the 1280px review clips after Gemini scores the clean ones.
+  dot_diameter_fraction: 0.04   # was 0.015 -- Kaveh could not see it on Oct-18 (2026-10-19)
+  dot_margin_fraction: 0.012
+  dot_frames: 36   # was 20 (~0.7s), too fast to notice; ~1.2s
+  dot_color: "FFD600"
+  box_thickness_px: 3.0
+  box_color: "00E5FF"
+  box_alpha: 0.85
+
+trim:
+  # `trim=N` picks export [N - lead, N + tail] of the review clip (2026-10-19);
+  # the window stretches to cover the score-flip tap if it is within the cap.
+  lead_seconds: 10.0
+  tail_seconds: 4.0
+  tap_tail_seconds: 1.5
+  max_tap_extension_seconds: 15.0

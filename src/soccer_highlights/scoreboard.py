@@ -195,6 +195,114 @@ def render_chrome(cfg: ExportConfig, layout: ScoreboardLayout) -> Image.Image:
     return im
 
 
+@dataclass(frozen=True)
+class ReplayBadgeLayout:
+    """The REPLAY badge hangs directly under the board, left edges aligned.
+    `x`/`y` are absolute frame coordinates of its top-left corner."""
+
+    width: int
+    height: int
+    x: int
+    y: int
+    dot_x: int  # relative to the badge's own top-left
+    dot_d: int
+    font_label: int
+    font_speed: int
+    x_label: int
+    x_rule: int
+    x_speed: int
+
+
+def speed_label(speed: float) -> str:
+    """`0.25x`, `0.5x`, `1x` -- the multiplication sign is a real glyph in both
+    shipped Arial files, unlike the unicode arrows tried first."""
+    return f"{speed:g}×"
+
+
+def compute_badge_layout(cfg: ExportConfig, board: ScoreboardLayout, speed: float) -> ReplayBadgeLayout:
+    k = board.height / (60 + 24 * 2)  # same recovered scale as render_chrome
+
+    def s(v: float) -> int:
+        return max(1, round(v * k))
+
+    font_label, font_speed = s(34), s(30)
+    pad, gap = s(22), s(14)
+    dot_d = s(16)
+    probe = ImageDraw.Draw(Image.new("RGBA", (8, 8)))
+    flabel = _font(cfg.scoreboard_font_narrow, font_label)
+    fspeed = _font(cfg.burn_in_font_path, font_speed)
+    label_w = _text_width(probe, "REPLAY", flabel)
+    speed_w = _text_width(probe, speed_label(speed), fspeed)
+    x_label = pad + dot_d + gap
+    x_rule = x_label + label_w + gap
+    x_speed = x_rule + gap
+    return ReplayBadgeLayout(
+        width=x_speed + speed_w + pad,
+        height=s(60),
+        x=board.inset,
+        y=board.inset + board.height + s(10),
+        dot_x=pad,
+        dot_d=dot_d,
+        font_label=font_label,
+        font_speed=font_speed,
+        x_label=x_label,
+        x_rule=x_rule,
+        x_speed=x_speed,
+    )
+
+
+def render_replay_badge(cfg: ExportConfig, badge: ReplayBadgeLayout, speed: float) -> Image.Image:
+    """The static half of the badge: the same dark panel as the board, the word
+    REPLAY, a gold rule, the speed. The dot is a separate same-size image
+    (`render_replay_dot`) so ffmpeg can blink it without blinking the text."""
+    k = badge.height / 60
+    im = Image.new("RGBA", (badge.width, badge.height), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    d.rounded_rectangle([0, 0, badge.width - 1, badge.height - 1], radius=max(1, round(14 * k)), fill=_PANEL)
+    cy = badge.height / 2
+    d.text((badge.x_label, cy), "REPLAY", font=_font(cfg.scoreboard_font_narrow, badge.font_label), fill=_W_FILL, anchor="lm")
+    rule_h = round(badge.height * 0.46)
+    d.line([badge.x_rule, cy - rule_h / 2, badge.x_rule, cy + rule_h / 2], fill=_ACCENT, width=3)
+    d.text((badge.x_speed, cy), speed_label(speed), font=_font(cfg.burn_in_font_path, badge.font_speed), fill=_MUTED, anchor="lm")
+    return im
+
+
+def render_replay_dot(badge: ReplayBadgeLayout) -> Image.Image:
+    im = Image.new("RGBA", (badge.width, badge.height), (0, 0, 0, 0))
+    cy = badge.height / 2
+    ImageDraw.Draw(im).ellipse(
+        [badge.dot_x, cy - badge.dot_d / 2, badge.dot_x + badge.dot_d, cy + badge.dot_d / 2], fill=_ACCENT
+    )
+    return im
+
+
+def replay_badge_pngs(cfg: ExportConfig, frame_width: int, speed: float) -> tuple[Path, Path, ReplayBadgeLayout]:
+    """(badge_png, dot_png, layout), cached in the system temp dir by a hash of
+    everything that affects the pixels -- same scheme as `chrome_png`."""
+    board = compute_layout(cfg, frame_width)
+    badge = compute_badge_layout(cfg, board, speed)
+    key = "|".join(
+        str(x)
+        for x in (
+            "badge-v1",
+            frame_width,
+            cfg.scoreboard_scale,
+            speed_label(speed),
+            cfg.burn_in_font_path,
+            cfg.scoreboard_font_narrow,
+        )
+    )
+    digest = hashlib.sha256(key.encode()).hexdigest()[:16]
+    tmp = Path(tempfile.gettempdir())
+    badge_path = tmp / f"soccer_hl_badge_{digest}.png"
+    dot_path = tmp / f"soccer_hl_badge_dot_{digest}.png"
+    if not badge_path.exists():
+        render_replay_badge(cfg, badge, speed).save(badge_path)
+    if not dot_path.exists():
+        render_replay_dot(badge).save(dot_path)
+    return badge_path, dot_path, badge
+
+
 def chrome_png(cfg: ExportConfig, frame_width: int) -> tuple[Path, ScoreboardLayout]:
     """Path to the chrome PNG for this config, drawing it if it isn't cached.
 

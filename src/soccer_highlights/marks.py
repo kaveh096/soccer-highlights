@@ -561,6 +561,47 @@ def is_near_cam_goal(
     return scoring_team == near_cam_team
 
 
+def near_cam_flag(
+    owner: ResolvedMark | None,
+    camera_mode: str,
+    halftime_seconds: float | None,
+    near_cam_team_first_half: str | None,
+) -> bool | None:
+    """The `is_near_cam_goal` sheet value for one candidate's owning mark.
+
+    None (= "no info", `review_tier` falls back to goal_this_end) for anything
+    that isn't a located white_goal/black_goal tap, and for an end-cam run whose
+    per-game camera config is incomplete. `camera_mode="center"` (2026-10-18:
+    camera at midfield, BOTH goals in view) returns True for every genuine goal
+    tap -- there is no unseen far end, so each one is tier 1 -- and needs no
+    halftime/first-half input. `camera_mode="end"` defers to `is_near_cam_goal`
+    exactly as before."""
+    if owner is None or owner.global_seconds is None or owner.mark.category not in _GOAL_CATEGORIES:
+        return None
+    if camera_mode == "center":
+        return True
+    if near_cam_team_first_half is None or halftime_seconds is None:
+        return None
+    return is_near_cam_goal(owner.mark.category, owner.global_seconds, halftime_seconds, near_cam_team_first_half)
+
+
+def sync_clap_flags(owners: list[ResolvedMark | None], enabled: bool = True) -> list[bool]:
+    """Per-candidate `is_sync_clap`: True for the candidate owned by the game's
+    chronologically-first `moment` mark (the kickoff clap-sync tap, a timing
+    reference rather than a highlight). `enabled=False` (pre-label's
+    --no-sync-clap, 2026-10-18, for a game with no clap) marks nothing -- the
+    first moment is then an ordinary moment and keeps its review boost.
+    Identified by the resolved mark itself, not clip position, since a moment's
+    fixed-window fallback can start well before the mark's own global_seconds."""
+    moment_owners = [
+        (owner.global_seconds, id(owner))
+        for owner in owners
+        if owner is not None and owner.mark.category == "moment" and owner.global_seconds is not None
+    ]
+    clap_id = min(moment_owners)[1] if moment_owners and enabled else None
+    return [owner is not None and id(owner) == clap_id for owner in owners]
+
+
 def review_tier(
     mark_category: str,
     gemini_score: int,
@@ -633,6 +674,44 @@ def review_sort_key(
     final, fully deterministic tiebreak."""
     tier = review_tier(mark_category, gemini_score, goal_this_end, is_near_cam_goal, is_sync_clap)
     return (tier, -gemini_score, start_seconds)
+
+
+def slomo_center_seconds(
+    interval: Interval,
+    source: str,
+    owner: ResolvedMark | None,
+    tap_lead_seconds: float = 3.0,
+) -> float | None:
+    """Where the slow-mo replay should centre, in seconds RELATIVE TO THE CLIP
+    START (2026-10-18), rounded to 0.1s and clamped into [0, clip duration].
+
+    Clip-relative is the same timeline as the rendered review clip's t=0: the
+    clip is cut from `interval.start_seconds` and `extend_for_score_flip` only
+    ever moves `end_seconds`, so `interval.start_seconds` (the sheet's
+    start_seconds) is always the clip's first frame.
+
+    The centre is the audio peak when the candidate has one -- the peak a `both`
+    mark snapped to, else the strongest peak of an `audio` candidate (the ball
+    strike / cheer is the moment worth slowing down). A pure `mark` candidate
+    (fixed-window fallback, audio found nothing) has no peak, so fall back to the
+    tap minus `tap_lead_seconds`: taps trail the event by the press delay.
+    None when neither a peak nor a located tap exists."""
+    peak_time: float | None = None
+    if source == "both" and owner is not None and owner.interval is not None and owner.interval.peaks:
+        peak_time = owner.interval.peaks[0].time_seconds
+    elif interval.peaks:
+        peak_time = max(interval.peaks, key=lambda p: p.score).time_seconds
+
+    if peak_time is not None:
+        global_center = peak_time
+    elif owner is not None and owner.global_seconds is not None:
+        global_center = owner.global_seconds - tap_lead_seconds
+    else:
+        return None
+
+    duration = interval.end_seconds - interval.start_seconds
+    relative = min(max(global_center - interval.start_seconds, 0.0), duration)
+    return round(relative, 1)
 
 
 @dataclass

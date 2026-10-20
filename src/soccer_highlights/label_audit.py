@@ -98,9 +98,10 @@ Write your answer in this order, so your score follows from your own observation
 - a one-sentence rationale explaining which tier this matches and why, referencing your own description above.
 - the score (1-5), consistent with goal_this_end, the description, and the rationale above -- if goal_this_end is true, score must be >=4; if the description shows no discernible action, score must be 1.
 - a short, factual one-line caption IN FARSI (Persian script), describing only what's visibly/audibly confirmable (e.g. equivalent of "Goal from close range, white team celebrates"). Do not invent player names, jersey numbers, or the exact score unless clearly legible/audible. This will be used to share clips with players. So focus on interesting details and funny or sad moments, not generic scene descriptions.
+- action_region: which horizontal third of the frame the key action (the ball, shot, or play) happens in over the clip -- "left", "center", or "right".
 
 Respond with ONLY a single JSON object, no other text, no code fence:
-{{"goal_this_end": true or false, "description": "2-4 sentences describing what happens in this clip", "rationale": "one short sentence explaining the score, referencing the description", "score": 1-5, "caption": "short factual caption in Farsi"}}"""
+{{"goal_this_end": true or false, "description": "2-4 sentences describing what happens in this clip", "rationale": "one short sentence explaining the score, referencing the description", "score": 1-5, "caption": "short factual caption in Farsi", "action_region": "left" or "center" or "right"}}"""
 
 _DESCRIBE_RESPONSE_SCHEMA_V2 = {
     "type": "OBJECT",
@@ -110,10 +111,69 @@ _DESCRIBE_RESPONSE_SCHEMA_V2 = {
         "rationale": {"type": "STRING"},
         "score": {"type": "INTEGER", "minimum": 1, "maximum": 5},
         "caption": {"type": "STRING"},
+        # LAST in property_ordering (2026-10-18) so it is generated after the score
+        # and cannot steer it. See ACTION_REGIONS / crop.py.
+        "action_region": {"type": "STRING", "enum": ["left", "center", "right"]},
     },
-    "required": ["goal_this_end", "description", "rationale", "score", "caption"],
-    "property_ordering": ["goal_this_end", "description", "rationale", "score", "caption"],
+    "required": ["goal_this_end", "description", "rationale", "score", "caption", "action_region"],
+    "property_ordering": ["goal_this_end", "description", "rationale", "score", "caption", "action_region"],
 }
+
+ACTION_REGIONS = ("left", "center", "right")
+
+# Camera-position prompt variants (2026-10-18). "end" = the camera sits next to
+# one goal (every game before Oct-18) and is the base text above, untouched.
+# "center" = the camera is at midfield on the sideline and sees BOTH goals, so
+# every phrase that treats the far end as the unseen one is rewritten to "either
+# end". Derived by exact substring replacement from the end prompt rather than
+# kept as a second copy, so the two can never drift apart on the shared scale/
+# checks, and each replacement is asserted to match exactly once at import time.
+# The JSON key stays `goal_this_end` (sheet columns and review tiering read it).
+_CENTER_PROMPT_REPLACEMENTS = (
+    (
+        "The camera is fixed next to one goal, facing the center of the field -- action at this end is clearly visible, the far end usually is not.",
+        "The camera is fixed at midfield on the sideline, facing the field -- both goals are in view, so action at either end is clearly visible.",
+    ),
+    (
+        "OR a likely goal (usually at the far end) that wasn't clearly visible from this camera.",
+        "OR a likely goal (e.g. hidden behind players or out of frame) that wasn't clearly visible from this camera.",
+    ),
+    (
+        "A clear goal at this end of the field that demands cheering",
+        "A clear goal at either end of the field that demands cheering",
+    ),
+    (
+        "If the ball clearly crosses the goal line at this (camera-side) end -- however it happened, however it looked -- the score CANNOT be 3 or lower; it must be at least 4. Tier 3's goal clause is ONLY for a goal you could NOT clearly see happen (typically far-side).",
+        "If the ball clearly crosses the goal line at either end of the field -- however it happened, however it looked -- the score CANNOT be 3 or lower; it must be at least 4. Tier 3's goal clause is ONLY for a goal you could NOT clearly see happen (e.g. hidden behind players or out of frame).",
+    ),
+    (
+        "true if the ball clearly crosses the goal line at THIS (camera-side) end and you can see it happen; false otherwise (including a far-side/unclear goal, or no goal at all).",
+        "true if the ball clearly crosses the goal line at EITHER end of the field and you can see it happen; false otherwise (including a goal you could not clearly see, or no goal at all).",
+    ),
+)
+
+
+def _derive_center_prompt(end_prompt: str) -> str:
+    out = end_prompt
+    for old, new in _CENTER_PROMPT_REPLACEMENTS:
+        if out.count(old) != 1:
+            raise AssertionError(f"center-prompt replacement must match exactly once: {old[:60]!r}")
+        out = out.replace(old, new)
+    return out
+
+
+CAMERA_POSITIONS = ("end", "center")
+_DESCRIBE_PROMPT_V2_CENTER = _derive_center_prompt(_DESCRIBE_PROMPT_V2)
+
+
+def describe_prompt_for(camera_position: str) -> str:
+    """The describe prompt template for a camera setup -- "end" (the default,
+    byte-identical to _DESCRIBE_PROMPT_V2) or "center"."""
+    if camera_position == "end":
+        return _DESCRIBE_PROMPT_V2
+    if camera_position == "center":
+        return _DESCRIBE_PROMPT_V2_CENTER
+    raise ValueError(f"unknown camera_position {camera_position!r} (expected one of {CAMERA_POSITIONS})")
 
 _JUDGE_PROMPT = """You are auditing ground-truth labels for a soccer-highlight-detection dataset. A human reviewer watched a short video clip and recorded a verdict and (optionally) a note. Separately, an AI model watched the same clip and rated it on a 1-5 highlight-worthiness scale and wrote a free-text description, without seeing the human's verdict or note.
 
@@ -158,6 +218,10 @@ class DescribeResult:
     # don't ask for this field. Lets a caller cheaply flag a categorical bug
     # (goal_this_end=True but score<4) without re-reading the description.
     goal_this_end: bool | None = None
+    # Which horizontal third of the frame the key action is in (2026-10-18), one
+    # of ACTION_REGIONS -- None when the model omitted it or returned anything
+    # else (tolerant on purpose: a bad region must never cost the clip its score).
+    action_region: str | None = None
 
 
 @dataclass
@@ -224,12 +288,14 @@ def _parse_describe_json(raw_text: str) -> DescribeResult:
     if not description:
         raise ValueError("empty description")
     goal_this_end = data.get("goal_this_end")
+    action_region = str(data.get("action_region") or "").strip().lower()
     return DescribeResult(
         score=score,
         caption=caption,
         description=description,
         rationale=str(data.get("rationale", "")),
         goal_this_end=bool(goal_this_end) if goal_this_end is not None else None,
+        action_region=action_region if action_region in ACTION_REGIONS else None,
     )
 
 
@@ -317,6 +383,7 @@ def generate_description(
     fps: int = 15,
     response_schema: dict | None = _DESCRIBE_RESPONSE_SCHEMA_V2,
     tap_context: str | None = None,
+    camera_position: str = "end",
 ) -> DescribeResult | None:
     """Score an already-rendered clip (the same file a human labels/labeled)
     -- no ffmpeg extraction here anymore (2026-07-28): review, describe, and
@@ -405,7 +472,14 @@ def generate_description(
     described a real goal (players audibly shouting "Gol") stayed a "goal"
     under every prompt tested, baseline included -- almost certainly a real
     tap mis-classification (mistapped `moment` instead of a goal counter),
-    not a prompt problem; don't expect this parameter to fix that case."""
+    not a prompt problem; don't expect this parameter to fix that case.
+
+    camera_position (2026-10-18): "end" (default, every game up to Oct-11) or
+    "center" (Oct-18: camera at midfield on the sideline, both goals visible) --
+    picks the prompt via describe_prompt_for; an explicit prompt_template wins.
+    The center wording is NOT sweep-validated, same status as fps=15 above.
+    action_region (2026-10-18) rides along on every call as the last schema
+    field; it adds no API call and cannot steer the score (generated after it)."""
     import os
 
     api_key = os.environ.get(cfg.api_key_env)
@@ -413,7 +487,9 @@ def generate_description(
         raise RuntimeError(f"{cfg.api_key_env} is not set -- see README's Vision AI section for setup")
 
     try:
-        prompt = _build_describe_prompt(prompt_template or _DESCRIBE_PROMPT_V2, duration_seconds, tap_context)
+        prompt = _build_describe_prompt(
+            prompt_template or describe_prompt_for(camera_position), duration_seconds, tap_context
+        )
         generation_config = (
             {"response_mime_type": "application/json", "response_schema": response_schema} if response_schema else None
         )
@@ -463,6 +539,7 @@ def _describe_to_dict(description: DescribeResult | None) -> dict | None:
         "description": description.description,
         "rationale": description.rationale,
         "goal_this_end": description.goal_this_end,
+        "action_region": description.action_region,
     }
 
 
@@ -475,6 +552,7 @@ def _describe_from_dict(data: dict | None) -> DescribeResult | None:
         description=data["description"],
         rationale=data.get("rationale", ""),
         goal_this_end=data.get("goal_this_end"),
+        action_region=data.get("action_region"),
     )
 
 
@@ -553,12 +631,21 @@ def run_describe_only(
     gemini_cfg: GeminiConfig,
     cache_path: Path,
     describe_fn: DescribeFn | None = None,
+    prompt_variant: str = "end",
 ) -> list[DescribeResult | None]:
     """Generate a Gemini description for every row with no judge step --
     for fresh, not-yet-labeled candidates (e.g. a brand-new game's
     audio-flagged clips), not an audit of an existing label. Resumable
     the same way run_audit is: a cached description is reused, a cached
-    `null` (failed attempt) is retried."""
+    `null` (failed attempt) is retried.
+
+    `prompt_variant` (2026-10-18) is the describe-prompt camera variant the
+    caller's describe_fn uses ("end"/"center"); it is stamped on every entry
+    and a cached description produced under a DIFFERENT variant raises instead
+    of being silently reused -- a center-cam run must never inherit end-cam
+    scores (the prompts disagree about which goals count). Entries written
+    before the field existed are "end". A cached `null` has nothing to reuse,
+    so it is just retried under the new variant."""
     describe_fn = describe_fn or generate_description
 
     cached: list[dict] = []
@@ -577,6 +664,12 @@ def run_describe_only(
             )
 
         description = _describe_from_dict(entry.get("describe")) if entry else None
+        if description is not None and entry.get("prompt_variant", "end") != prompt_variant:
+            raise ValueError(
+                f"Cache variant mismatch at index {i} ({row.strategy}/{row.clip_file}): cached description was "
+                f"produced with the {entry.get('prompt_variant', 'end')!r} prompt, this run uses {prompt_variant!r}. "
+                f"Delete {cache_path} and rerun."
+            )
         if description is None:
             duration = row.interval.end_seconds - row.interval.start_seconds
             # tap_context is only ever set by pre-label's rows -- every other
@@ -594,6 +687,7 @@ def run_describe_only(
             "start_seconds": round(row.interval.start_seconds, 2),
             "end_seconds": round(row.interval.end_seconds, 2),
             "describe": _describe_to_dict(description),
+            "prompt_variant": prompt_variant,
         }
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         with open(cache_path, "w", encoding="utf-8") as f:

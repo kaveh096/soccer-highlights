@@ -231,6 +231,12 @@ class ExportConfig:
     # ffmpeg. Pillow needs real paths regardless.
     burn_in_font_path_bold: str = "C:/Windows/Fonts/arialbd.ttf"
     scoreboard_font_narrow: str = "C:/Windows/Fonts/ARIALNB.TTF"
+    # REPLAY badge (2026-10-19): a second panel under the scoreboard for the
+    # duration of a slow-mo replay -- flashing dot, "REPLAY", the speed. Only
+    # drawn when there is a scoreboard to hang it under. The dot blinks at
+    # `replay_badge_flash_hz` in OUTPUT time (what the viewer sees), 60% duty.
+    replay_badge: bool = True
+    replay_badge_flash_hz: float = 1.25
 
 
 @dataclass
@@ -411,6 +417,62 @@ class TelegramConfig:
 
 
 @dataclass
+class CropConfig:
+    """Geometry of the action-region crop window, as fractions of the frame
+    (2026-10-18). ONE definition shared by the review overlay (draws the box on
+    the 1280px review clip) and export (crops the 4K source) so what Kaveh sees
+    outlined while picking is exactly what gets exported. 2/3 x 2/3 of a
+    3840x2160 frame is 2560x1440 -- the 1.5x crop that keeps today's share width
+    with no upscale. Use `soccer_highlights.crop.crop_rect`, not these fields
+    directly, to turn a region name into a rectangle."""
+
+    width_fraction: float = 2 / 3
+    height_fraction: float = 2 / 3
+    # Vertical centre of the window as a fraction of frame height. The action
+    # band sits mid-frame with a side-of-court camera, so 0.5 (window spans
+    # 1/6..5/6) is the default; raise/lower it if a future setup sits lower/higher.
+    y_center: float = 0.5
+
+
+@dataclass
+class ReviewOverlayConfig:
+    """Look of the review-only overlay burned into the 1280px review clips
+    AFTER Gemini has scored the clean clips (2026-10-18): a crop-box outline for
+    the clip's action_region and one small dot marking the slow-mo centre.
+    Review clips only -- exports never get either."""
+
+    # Dot: ~4% of frame width (was 1.5%, invisible on Oct-18), top-right corner, shown for dot_frames frames
+    # centred on slomo_center_s. Yellow with a dark rim reads on grass, court and
+    # both shirt colours.
+    dot_diameter_fraction: float = 0.04
+    dot_margin_fraction: float = 0.012
+    dot_frames: int = 36
+    dot_color: str = "FFD600"
+    # Box outline: thickness in pixels at 1280px wide (scaled for other widths).
+    box_thickness_px: float = 3.0
+    box_color: str = "00E5FF"
+    box_alpha: float = 0.85
+
+
+@dataclass
+class TrimConfig:
+    """Window of a `trim=N` pick around the goal/moment second N (2026-10-19):
+    exports [N - lead, N + tail] of the review clip instead of the whole 40-110s
+    audio-merged candidate. See `soccer_highlights.picks.trim_window`."""
+
+    lead_seconds: float = 10.0
+    tail_seconds: float = 4.0
+    # The scoreboard flips at the TAP (settled 2026-09-05), which can land after
+    # N + tail; the window is stretched to tap + this so the flip is on screen.
+    tap_tail_seconds: float = 1.5
+    # ...but only if the tap is within this many seconds of N. Further than that
+    # is a slow/forgotten press (or a wrong N), and stretching to it would
+    # re-create the long clip trim exists to avoid; the clip is then cut at
+    # N + this and the pick is flagged with a loud warning.
+    max_tap_extension_seconds: float = 15.0
+
+
+@dataclass
 class Config:
     input: InputConfig = field(default_factory=InputConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
@@ -425,6 +487,9 @@ class Config:
     label_audit: LabelAuditConfig = field(default_factory=LabelAuditConfig)
     marks: MarksConfig = field(default_factory=MarksConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
+    crop: CropConfig = field(default_factory=CropConfig)
+    review_overlay: ReviewOverlayConfig = field(default_factory=ReviewOverlayConfig)
+    trim: TrimConfig = field(default_factory=TrimConfig)
 
 
 def _apply_dict(obj: Any, data: dict[str, Any]) -> None:

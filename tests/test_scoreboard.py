@@ -98,3 +98,30 @@ def test_score_stages_gate_the_flip_on_the_pieces_own_timeline():
     assert len(before) == 1 and "1 - 0" in before[0]
     assert len(spanning) == 2 and "lt(t,1.000)" in spanning[0] and "gte(t,1.000)" in spanning[1]
     assert len(after) == 1 and "2 - 0" in after[0]
+
+
+def test_replay_badge_hangs_under_the_board_and_scales_with_it():
+    from PIL import Image
+
+    from soccer_highlights.scoreboard import compute_layout, replay_badge_pngs
+
+    cfg = ExportConfig()
+    board = compute_layout(cfg, 2560)
+    badge_path, dot_path, badge = replay_badge_pngs(cfg, 2560, 0.25)
+
+    assert badge.x == board.inset and badge.y > board.inset + board.height
+    assert badge.width < board.width  # a tag, not a second board
+    for path in (badge_path, dot_path):
+        assert Image.open(path).size == (badge.width, badge.height)
+    # Dot and text are separate layers so only the dot blinks.
+    assert Image.open(dot_path).getbbox()[2] < badge.x_label
+    # Smaller frame -> proportionally smaller badge.
+    assert replay_badge_pngs(cfg, 1280, 0.25)[2].width < badge.width
+
+
+def test_replay_badge_png_is_cached_per_speed():
+    from soccer_highlights.scoreboard import replay_badge_pngs
+
+    cfg = ExportConfig()
+    assert replay_badge_pngs(cfg, 2560, 0.25)[0] == replay_badge_pngs(cfg, 2560, 0.25)[0]
+    assert replay_badge_pngs(cfg, 2560, 0.25)[0] != replay_badge_pngs(cfg, 2560, 0.5)[0]

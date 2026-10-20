@@ -281,6 +281,10 @@ What to read off the output:
 
 ### Step 0d -- infer the camera position (`infer-camera`)
 
+**Skip this step when the camera is at center field** (Kaveh says so; pass
+`pre-label --camera-position center` instead). `infer-camera` only answers
+"which team's goal is the camera behind".
+
 Report-only, no render and no API calls (~1-2 min: 36 single-frame ffmpeg
 seeks per chunk off the `.LRF`). Replaces asking Kaveh "whose shots does the
 camera see" every game -- ask only when it comes back inconclusive.
@@ -366,8 +370,39 @@ cd C:/dev/soccer-highlights
   [--tally-csv "black_goal=G:/.../<date>/Raw/tally_black_goal.csv"] \
   [--tally-csv "moment=G:/.../<date>/Raw/tally_moment.csv"] \
   [--clock-offset-seconds <from Step 0c, usually omit>] \
-  [--near-cam-team-first-half {white,black}]
+  [--near-cam-team-first-half {white,black}] \
+  [--camera-position {end,center}] \
+  [--no-sync-clap] \
+  [--work-dir <local scratch, default under %TEMP%>]
 ```
+
+**Order inside `pre-label`** (2026-10-18): clean review clips are rendered
+into a LOCAL work dir -> Gemini scores those clean clips -> the sheet is
+written -> an overlay pass re-encodes each 1280px clip with the **crop box**
+(cyan outline of its `action_region`) and the **slow-mo center dot** (yellow,
+top-right, ~20 frames) and publishes it flat into `Review\`. Gemini never sees
+an overlay. The overlay pass costs ~8-9s per 10s clip (~12-15 min for ~55
+clips). Every step is resumable via `pre_label_ledger.json` in the work dir
+(signature match + `is_playable()`); a failed overlay publishes the clean clip
+with a loud warning and is retried on the next run.
+
+**`--camera-position center`** (2026-10-18, first used Oct-18): the camera sits
+at midfield on the sideline and sees both goals. Swaps the describe prompt's
+"goal at THIS end" wording for "goal clearly visible at either end" (the JSON
+key stays `goal_this_end`), puts every genuine goal tap in tier 1, and is
+rejected in combination with `--near-cam-team-first-half`. Skip Step 0d for a
+center-cam game. The descriptions cache records the prompt variant per entry
+and refuses to reuse an entry written under the other variant.
+
+**`--no-sync-clap`** (2026-10-18): use when there was no kickoff clap + `moment`
+tap. Without it the chronologically-first `moment` is assumed to be the clap
+and loses its review boost.
+
+**New sheet columns** (2026-10-18): `action_region` (`left|center|right`, from
+the same Gemini call -- the field is ordered last in the schema so it can't
+steer the score; blank = unknown = full frame at export) and `slomo_center_s`
+(seconds from the clip's start: the audio peak, or tap - 3s when the clip has
+no peak; this is where the dot shows).
 
 **`--near-cam-team-first-half`** (added 2026-09-07): which team's SHOTS the
 camera captures in the FIRST half, i.e. the **attacking** team -- the
@@ -587,7 +622,8 @@ tap; tier 5 is everything else by score. A `moment` tap never reaches tier 1
 even if Gemini claims a goal -- see SKILL.md's settled-decisions list for the
 full "taps beat Gemini" rationale. A sheet without `mark_category`/
 `goal_this_end` (an older or audio-only game) falls back to the original
-plain score-desc sort, unchanged.
+plain score-desc sort, unchanged. With `--camera-position center`, every
+genuine goal tap is tier 1 (both goals are in view).
 
 - The `c0NN` token is what keeps every rename reversible and keeps the review
   sheet, the describe cache, `export-picks` and `telegram-post` all resolving to
@@ -775,6 +811,40 @@ final word. **This is the actual decision step** -- Kaveh watches the
 higher-ranked clips directly and picks off the ranked order +
 `gemini_description`/caption text; nothing is written back to the sheet.
 
+**When candidates are ready for review (after Step 1b/1c), Claude prints the
+pick format below to Kaveh, unprompted**, so he can write his picks in it
+(added 2026-10-18). One line per pick, rank first, optional tokens in any
+order:
+
+```
+<rank> [crop=left|center|right|full] [trim=N] [slomo | slomo=A-B | slomo=A-B@S | slomo@S]
+
+r03                       # export as-is; crop = the sheet's action_region (the cyan box)
+r04 trim=58               # export [48s, 62s] around the goal; extended to cover the tap
+r05 crop=left             # the box was wrong -> override the crop
+r07 slomo                 # replay [dot-2s, dot+1s] at 0.25x, appended after the clip
+r07 slomo=6.5-9           # custom window, seconds on the review clip's own timeline
+r09 slomo=4-7@0.5 crop=full   # custom speed; full = no crop
+```
+
+- `<rank>` = the `rNN` prefix of the rank-named review file (`r3` and a full
+  `clip_file` name also work).
+- The yellow dot in each review clip marks the default slow-mo center; the
+  cyan box is the crop export will use unless `crop=` overrides it.
+- `trim=N` (2026-10-19), N = the second on the review clip's own timeline where
+  the goal/moment happens: exports [N-10, N+4] instead of the whole 40-110s
+  candidate. If the sheet's score flip (the tap) lands after N+4 the window
+  stretches to tap+1.5s so the counter visibly flips; if the tap is more than
+  15s after N it stops at N+15 and prints a loud `WARNING` (the score will not
+  change in that clip). A flip before the window starts the clip on the
+  post-flip score. `slomo` with trim defaults to [N-2, N+1]; slomo windows stay
+  on the original review-clip timeline. Tokens may be separated by spaces
+  and/or commas, any case (`R04 trim=58, slomo`). Defaults: `trim:` in
+  `config/default.yaml`.
+- Save the lines as-is to `Review\picks.txt` (UTF-8) and pass it straight to
+  Step 4. Every line is validated before anything renders; all bad lines are
+  reported together.
+
 ### Step 4 -- export share-quality clips (`export-picks`)
 
 ```bash
@@ -784,10 +854,47 @@ cd C:/dev/soccer-highlights
   --source-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Raw" \
   export-picks \
   --review-sheet "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Review/review_sheet.csv" \
-  --clips clip_0NN.mp4,clip_0MM.mp4,... \
+  --picks-file "G:/.../<date>/Review/picks.txt" \
   --crf 30 \
   --out-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Share"
 ```
+`--picks-file` (Step 3's format), `--picks "r03; r05 crop=left"` (same
+grammar inline) and the older `--clips clip_0NN.mp4,...` are mutually
+exclusive. `--no-crop` ignores the sheet's `action_region` for the whole run.
+
+**Crop and slow-mo at export** (2026-10-18):
+- **Crop**: a 2/3 x 2/3 window of the 4K frame (2560x1440, `crop:` in
+  `config/default.yaml`, geometry in `soccer_highlights/crop.py` -- shared
+  with the review box so they can't disagree), cut BEFORE scaling, so it is
+  1.5x the detail at the same share width with no upscale. Default = the
+  sheet's `action_region`; blank or an older sheet without the column = full
+  frame, byte-identical to the pre-crop filter chain.
+- **Slow-mo replay**: appended after the live clip; decodes the 119.88fps
+  source at full rate and stretches pts BEFORE the fps filter, so 0.25x is
+  true 4x slow-mo from real frames (no interpolation). Muted (a silent AAC
+  track matching the source layout keeps concat/Telegram clean), same crop,
+  scoreboard on with the score as of that moment, clock showing true
+  wall-clock (ticks slowly). Live and replay parts are encoded with identical
+  settings and joined by stream-copy concat. A REPLAY badge (flashing gold dot,
+  "REPLAY", speed) hangs under the scoreboard for the replay only; it is
+  overlaid after setpts+fps so the blink (`replay_badge_flash_hz`, default
+  1.25) is in output time. Only drawn when there is a scoreboard.
+- **Cost**: a default 3s window = 12 output seconds -- budget ~3-5 extra
+  minutes per slow-mo pick on this laptop, and more `--crf` headroom for the
+  50MB limit. A long window (e.g. 8s at 0.25x = 32s) is one long segment.
+- **Trim** (2026-10-19): `trim=N` cuts the live part to [start+t0, start+t1]
+  (`picks.trim_window`); burn-in clock epoch, scoreboard (rebased flip) and
+  seg_render's `plan.json` all follow the trimmed window. The slow-mo replay is
+  still cut from the full clip and keeps the original-timeline score. A trimmed
+  clip over ~15s still goes through `seg_render.py`.
+- **Re-exporting a pick with different options**: `export-picks` skips an
+  existing playable output regardless of crop/slow-mo -- delete the old file
+  first.
+- **`seg_render.py`** (clips >15s) takes the same grammar: `--pick "r07
+  slomo=6.5-9 crop=left"` inline, or `--clip r07 --picks-file picks.txt`. The
+  replay is its last resumable segment, and a `plan.json` next to the
+  segments discards stale segments if the crop/slow-mo plan changed between
+  runs.
 Re-encodes just the picked clips (by `clip_file`, reading start/end straight from
 the sheet -- no re-detection, no index-drift risk) from the **full-res 4K `.MP4`**
 (never the `.LRF`) at `export.*` settings, with `--crf` overriding the archival

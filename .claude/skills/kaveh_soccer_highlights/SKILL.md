@@ -261,6 +261,45 @@ marks) -> posted to a Telegram group with the Farsi caption.
   real "was this one goal or two" auto-correction is worth building from
   labeled examples. Kaveh's own plan (2026-09-07): come back to this after
   export, not before.
+- **Camera position is per game: `end` (behind a goal, the default) or
+  `center` (midfield sideline, first used 2026-10-18)** -- `pre-label
+  --camera-position center` swaps the describe prompt's "this end" wording
+  for "either end", tiers every goal tap first, and replaces Step 0d. Ask
+  Kaveh where the camera was if he doesn't say. No kickoff clap ->
+  `--no-sync-clap`.
+- **Zoom = a static per-clip crop, not ball tracking** (2026-10-18, Kaveh as
+  PM, Claude as TL). Gemini's describe call also returns `action_region`
+  (left/center/right third); export crops a 2560x1440 window of the 4K
+  source there (1.5x, no upscale), whole clip including the slow-mo replay.
+  Rejected, don't re-propose without new evidence: ball detection/tracking
+  (ball ~10-20px at 4K, blur/occlusion, no GPU -- and a wrong crop cuts the
+  goal out, a recall regression), auto-pan, zoom only on replays (Kaveh
+  said no), a separate single-frame vision call before render (the frame
+  often lands after the shot; drawing the box before Gemini would contaminate
+  scoring). The cyan box burned into each review clip is the human gate --
+  Kaveh corrects a wrong region with `crop=` in his pick line. Auto-pan from
+  motion on the `.LRF` is the possible v2 if static crops prove too loose.
+- **Slow-mo is a replay appended after the live clip, picked per clip by
+  Kaveh** (2026-10-18). Default window [dot-2s, dot+1s] at 0.25x = 12s of
+  replay, true 4x from the 120fps source. The yellow dot in each review clip
+  marks the slow-mo center -- ONE dot (audio peak, else tap - 3s), because
+  showing peak and tap separately was rejected as confusing. The replay
+  wears a **REPLAY badge** (2026-10-19): a small panel under the scoreboard
+  (flashing gold dot, "REPLAY", the speed), same dark panel/gold accent as the
+  board, composited after the slow-mo stretch so it blinks in real playback
+  time. `replay_badge: false` in `ExportConfig` turns it off.
+- **A human's `trim=N` / `slomo` mark lags the action** (Oct-18 R01: mark 31,
+  ball struck at 28.0, in at ~29.3). The default replay window [N-2, N+1] then
+  starts after the shot. Check the first replay frames against the live part
+  and set `slomo=A-B` explicitly (start ~0.5s before the strike) when the
+  strike is earlier than the mark.
+- **Picks come as structured lines** (`r07 slomo=6.5-9 crop=left`, format in
+  processing.md Step 3). **Print that format to Kaveh when the candidates
+  are ready for review**, every game, without being asked. `trim=N` (2026-10-19)
+  exports only a window around second N of the review clip (10s before, 4s
+  after, stretched to cover the score-flip tap, capped at N+15s with a loud
+  warning); Kaveh gives just that one number. The scoreboard is rebased onto
+  the window and the counter still flips at the TAP, not the goal.
 - **Recall-first.** Throughout audio tuning and vision work, the standing priority
   is "don't miss real events" over "don't bombard with false positives." A change
   that only cuts precision at the cost of recall is not obviously a net win.

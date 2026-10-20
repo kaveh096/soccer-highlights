@@ -1,6 +1,10 @@
+import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
+from soccer_highlights import label_audit
 from soccer_highlights.label_audit import (
     AuditRow,
     DescribeResult,
@@ -304,3 +308,117 @@ def test_run_describe_only_detects_cache_mismatch(tmp_path):
         assert False, "expected a cache mismatch error"
     except ValueError:
         pass
+
+
+# --- action_region / camera-position prompt variants / cache variant (2026-10-18) ---
+
+import hashlib
+
+_END_PROMPT_SHA256 = "dfec3dc411c05e57892b9d62bd02010c116fe8f261d5cf2553860f886009c7ec"
+_ACTION_REGION_BULLET = (
+    '\n- action_region: which horizontal third of the frame the key action (the ball, shot, or play) '
+    'happens in over the clip -- "left", "center", or "right".'
+)
+_ACTION_REGION_JSON = ', "action_region": "left" or "center" or "right"'
+
+
+def _describe_json(**extra) -> str:
+    return json.dumps({"score": 4, "caption": "cap", "description": "desc", "rationale": "r", **extra})
+
+
+def test_parse_describe_json_action_region_valid_is_normalised():
+    assert _parse_describe_json(_describe_json(action_region="left")).action_region == "left"
+    assert _parse_describe_json(_describe_json(action_region=" Right ")).action_region == "right"
+
+
+def test_parse_describe_json_action_region_missing_or_invalid_is_none_and_keeps_the_score():
+    assert _parse_describe_json(_describe_json()).action_region is None
+    for bad in ("middle", "", None, 7):
+        result = _parse_describe_json(_describe_json(action_region=bad))
+        assert result.action_region is None
+        assert result.score == 4  # a bad region never costs the clip its score
+
+
+def test_action_region_is_the_last_schema_field_so_it_cannot_steer_the_score():
+    order = label_audit._DESCRIBE_RESPONSE_SCHEMA_V2["property_ordering"]
+    assert order[-1] == "action_region"
+    assert order.index("score") < order.index("action_region")
+    assert label_audit._DESCRIBE_RESPONSE_SCHEMA_V2["properties"]["action_region"]["enum"] == ["left", "center", "right"]
+
+
+def test_end_prompt_is_unchanged_except_for_the_action_region_addition():
+    end = label_audit.describe_prompt_for("end")
+    assert end is label_audit._DESCRIBE_PROMPT_V2
+    assert _ACTION_REGION_BULLET in end and _ACTION_REGION_JSON in end
+    original = end.replace(_ACTION_REGION_BULLET, "").replace(_ACTION_REGION_JSON, "")
+    assert hashlib.sha256(original.encode()).hexdigest() == _END_PROMPT_SHA256
+    assert end.format(duration=12.3)  # still a valid .format template
+
+
+def test_center_prompt_says_either_end_and_keeps_the_rest():
+    end = label_audit.describe_prompt_for("end")
+    center = label_audit.describe_prompt_for("center")
+    assert center != end
+    for stale in ("this end", "THIS (camera-side)", "this (camera-side)", "far end", "far-side", "next to one goal"):
+        assert stale not in center
+    assert "either end" in center.lower()
+    assert "goal_this_end" in center  # JSON key unchanged
+    assert _ACTION_REGION_BULLET in center and _ACTION_REGION_JSON in center
+    assert center.format(duration=9.0)
+    with pytest.raises(ValueError):
+        label_audit.describe_prompt_for("corner")
+
+
+def test_tap_context_insertion_still_works_for_the_center_prompt():
+    prompt = _build_describe_prompt(label_audit.describe_prompt_for("center"), 9.0, "the white team scored a goal")
+    assert prompt.index("the white team scored a goal") < prompt.index("Rate how highlight-worthy")
+
+
+def test_describe_result_action_region_survives_the_cache_round_trip():
+    result = DescribeResult(score=4, caption="c", description="d", action_region="center")
+    assert label_audit._describe_from_dict(label_audit._describe_to_dict(result)).action_region == "center"
+    legacy = {"score": 3, "caption": "c", "description": "d"}  # entry written before the field existed
+    assert label_audit._describe_from_dict(legacy).action_region is None
+
+
+def test_run_describe_only_stamps_the_prompt_variant(tmp_path):
+    cache_path = tmp_path / "descriptions.json"
+    run_describe_only([_row()], None, cache_path, describe_fn=lambda p, d, g: _describe(), prompt_variant="center")
+    assert json.loads(cache_path.read_text(encoding="utf-8"))[0]["prompt_variant"] == "center"
+
+
+def _cache_entry(**extra) -> dict:
+    return {"strategy": "strike_loose", "clip_file": "clip_001.mp4", "start_seconds": 0.0, "end_seconds": 10.0,
+            "describe": {"score": 3, "caption": "c", "description": "already done", "rationale": ""}, **extra}
+
+
+def test_run_describe_only_refuses_to_reuse_a_description_from_another_prompt_variant(tmp_path):
+    cache_path = tmp_path / "descriptions.json"
+    cache_path.write_text(json.dumps([_cache_entry(prompt_variant="end")]), encoding="utf-8")
+    with pytest.raises(ValueError, match="variant mismatch"):
+        run_describe_only([_row()], None, cache_path, describe_fn=lambda p, d, g: _describe(), prompt_variant="center")
+
+
+def test_run_describe_only_treats_legacy_entries_without_a_variant_as_end(tmp_path):
+    cache_path = tmp_path / "descriptions.json"
+    cache_path.write_text(json.dumps([_cache_entry()]), encoding="utf-8")  # no prompt_variant key
+    calls = []
+    results = run_describe_only(
+        [_row()], None, cache_path, describe_fn=lambda p, d, g: calls.append(p) or _describe(), prompt_variant="end"
+    )
+    assert calls == [] and results[0].description == "already done"
+    with pytest.raises(ValueError, match="variant mismatch"):
+        run_describe_only([_row()], None, cache_path, describe_fn=lambda p, d, g: _describe(), prompt_variant="center")
+
+
+def test_run_describe_only_retries_a_failed_entry_under_the_new_variant(tmp_path):
+    cache_path = tmp_path / "descriptions.json"
+    entry = _cache_entry(prompt_variant="end")
+    entry["describe"] = None
+    cache_path.write_text(json.dumps([entry]), encoding="utf-8")
+    calls = []
+    run_describe_only(
+        [_row()], None, cache_path, describe_fn=lambda p, d, g: calls.append(p) or _describe(), prompt_variant="center"
+    )
+    assert len(calls) == 1  # nothing was reusable, so no error -- just a retry
+    assert json.loads(cache_path.read_text(encoding="utf-8"))[0]["prompt_variant"] == "center"

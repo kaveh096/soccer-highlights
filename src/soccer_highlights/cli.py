@@ -81,7 +81,11 @@ Subcommands:
                   human label yet), and write a fillable review_sheet.csv
                   (+events.json) in the same batch-review-compatible
                   shape, plus a bonus gemini_description column, for a
-                  first labeling pass.
+                  first labeling pass. Since 2026-10-18: Gemini scores CLEAN
+                  clips (rendered in a local work dir), then each review clip
+                  is re-encoded with its action_region crop-box outline and
+                  slow-mo dot burned in; --camera-position center and
+                  --no-sync-clap cover a midfield camera / no kickoff clap.
   ingest-marks  - report-only v1 (2026-08-31) of the live-tagging ingest
                   (see marks.py): parse a wall-clock marks CSV
                   (timestamp/category/sequence -- white_goal/black_goal/
@@ -109,6 +113,7 @@ from __future__ import annotations
 import argparse
 import csv
 import functools
+import hashlib
 import json
 import os
 import re
@@ -123,6 +128,7 @@ from soccer_highlights import (
     label_audit,
     marks,
     render,
+    review_overlay,
     telegram,
     vision,
     vision_eval,
@@ -328,26 +334,55 @@ def cmd_export(cfg: Config, out_dir_override: str | None, burn_in_time: bool = T
 def cmd_export_picks(
     cfg: Config,
     review_sheet_path: str,
-    clip_files: list[str],
+    pick_text: str,
     out_dir_override: str | None,
     crf_override: int | None,
     burn_in_time: bool = True,
+    use_sheet_crop: bool = True,
 ) -> None:
-    """Re-encode a user-specified subset of a review_sheet.csv's rows (by
-    clip_file) from the full-res source at export.* settings -- for
-    exporting just the final hand-picked top clips, not every detected
-    candidate (see cmd_export for that). Reads start/end seconds straight
-    from the sheet instead of re-running detection, so there's no risk of
-    interval-index drift if detection config has changed since the sheet
-    was generated."""
+    """Re-encode a user-specified subset of a review_sheet.csv's rows from the
+    full-res source at export.* settings -- for exporting just the final
+    hand-picked top clips, not every detected candidate (see cmd_export for
+    that). Reads start/end seconds straight from the sheet instead of
+    re-running detection, so there's no risk of interval-index drift if
+    detection config has changed since the sheet was generated.
+
+    `pick_text` is pick-line syntax (see soccer_highlights.picks): one pick per
+    line, `<rank> [crop=...] [trim=N] [slomo...]`; plain clip_file names work too, which
+    is how `--clips` feeds in. Every pick is parsed, matched to its row and
+    given its crop region / slow-mo window BEFORE the first frame is rendered
+    (2026-10-18) -- a ~37x-realtime batch must not discover a typo in pick 9
+    after rendering picks 1-8. Crop defaults to the sheet's `action_region`
+    (blank -> full frame) unless `use_sheet_crop` is off or the pick says
+    `crop=`.
+
+    `trim=N` (2026-10-19) exports only [start + t0, start + t1] of the row (see
+    picks.trim_window): the interval below is the TRIMMED one, so slices and
+    the burned-in clock epoch follow it, and the scoreboard is rebased onto it.
+    The slow-mo replay is still mapped from the row's full interval (its window
+    is on the original review-clip timeline) and keeps the un-rebased score."""
+    from soccer_highlights import picks as picks_mod
+
     with open(review_sheet_path, encoding="utf-8-sig") as f:
         rows = list(csv.DictReader(f))
-    by_clip_file = {row["clip_file"]: row for row in rows}
-    missing = [c for c in clip_files if c not in by_clip_file]
-    if missing:
-        raise SystemExit(f"clip_file(s) not found in {review_sheet_path}: {', '.join(missing)}")
-
     chunks = discover_chunks(cfg.input.source_dir)
+    try:
+        resolved = picks_mod.load_picks(pick_text, rows, use_sheet_crop=use_sheet_crop, trim_cfg=cfg.trim)
+        plans: list[tuple[picks_mod.ResolvedPick, Interval, render.Replay | None]] = []
+        for pick in resolved:
+            full = Interval(start_seconds=float(pick.row["start_seconds"]), end_seconds=float(pick.row["end_seconds"]))
+            replay = render.build_replay(full, pick.slomo, chunks) if pick.slomo is not None else None
+            start, end = pick.export_seconds()
+            plans.append((pick, Interval(start_seconds=start, end_seconds=end), replay))
+    except (picks_mod.PickError, ValueError) as exc:
+        details = "\n  ".join(exc.errors if isinstance(exc, picks_mod.PickError) else [str(exc)])
+        raise SystemExit(f"Bad pick(s) for {review_sheet_path}, nothing rendered:\n  {details}")
+    if not plans:
+        raise SystemExit("No picks given")
+    for pick, _, _ in plans:
+        if pick.trim is not None and pick.trim.warning:
+            print(f"!! WARNING {pick.clip_file}: {pick.trim.warning}", flush=True)
+
     export_cfg = cfg.export
     if crf_override is not None:
         export_cfg.crf = crf_override
@@ -358,24 +393,27 @@ def cmd_export_picks(
 
     with tempfile.TemporaryDirectory(prefix="soccer_hl_export_picks_") as tmp_dir_str:
         tmp_dir = Path(tmp_dir_str)
-        for i, clip_file in enumerate(clip_files):
-            row = by_clip_file[clip_file]
-            clip_path = out_dir / clip_file
+        for i, (pick, interval, replay) in enumerate(plans):
+            clip_path = out_dir / pick.clip_file
             if render.is_playable(clip_path):
-                print(f"Skipping {i + 1}/{len(clip_files)}: {clip_path.name} (already exported)")
+                print(f"Skipping {i + 1}/{len(plans)}: {clip_path.name} (already exported)")
                 continue
             if clip_path.exists():
                 # Present but unplayable == a killed render's truncated leftover.
                 # Drop it rather than skipping it (see render.is_playable).
                 print(f"Re-exporting {clip_path.name}: existing file is truncated/unplayable")
                 clip_path.unlink()
-            interval = Interval(start_seconds=float(row["start_seconds"]), end_seconds=float(row["end_seconds"]))
             slices = map_interval_to_chunks(interval, chunks)
-            score = render.ScoreOverlay.from_sheet_row(row)
-            print(f"Exporting {i + 1}/{len(clip_files)}: {clip_path.name} ({interval.end_seconds - interval.start_seconds:.1f}s)")
-            render.render_export_clip(slices, clip_path, tmp_dir, export_cfg, score)
+            score = render.ScoreOverlay.from_sheet_row(pick.row)
+            live_score = score.rebased(pick.trim.start_seconds, pick.trim.end_seconds) if score and pick.trim else score
+            crop = picks_mod.rect_for_region(pick.region, cfg.crop)
+            print(
+                f"Exporting {i + 1}/{len(plans)}: {clip_path.name} "
+                f"({interval.end_seconds - interval.start_seconds:.1f}s, {pick.describe()})"
+            )
+            render.render_export_clip(slices, clip_path, tmp_dir, export_cfg, live_score, crop, replay, score)
 
-    print(f"\nExported {len(clip_files)} clip(s) to {out_dir}")
+    print(f"\nExported {len(plans)} clip(s) to {out_dir}")
 
 
 def cmd_telegram_post(
@@ -691,6 +729,21 @@ def review_dir_for(out_dir: str | Path) -> Path:
     return path
 
 
+def _pre_label_work_dir(out_dir: str | Path, override: str | None) -> Path:
+    """Local scratch dir for pre-label's clean clips + resume ledger (2026-10-18).
+
+    Stable per out_dir so a rerun finds the previous run's finished work, and
+    deliberately NOT inside out_dir: that is usually a Google Drive folder, which
+    is slow and flaky for encoding, and Review\\ must stay flat. Default is
+    <system temp>/soccer_hl_pre_label/<parent>_<name>_<hash of the full path>."""
+    if override:
+        return Path(override)
+    resolved = Path(out_dir).resolve()
+    digest = hashlib.sha1(str(resolved).lower().encode("utf-8")).hexdigest()[:8]
+    label = re.sub(r"[^A-Za-z0-9_.-]+", "_", f"{resolved.parent.name}_{resolved.name}")
+    return Path(tempfile.gettempdir()) / "soccer_hl_pre_label" / f"{label}_{digest}"
+
+
 def cmd_pre_label(
     cfg: Config,
     out_dir: str,
@@ -700,6 +753,9 @@ def cmd_pre_label(
     tally_csvs: list[str] | None = None,
     clock_offset: float = 0.0,
     near_cam_team_first_half: str | None = None,
+    camera_mode: str = "end",
+    no_sync_clap: bool = False,
+    work_dir: str | None = None,
 ) -> None:
     """Detect candidates in a brand-new (not-yet-labeled) recording,
     render small/fast clips, generate a Gemini description for each (no
@@ -743,7 +799,37 @@ def cmd_pre_label(
     genuine goal tap -- see marks.review_tier. Halftime is auto-detected as
     the single largest inter-chunk recording gap
     (discovery.detect_halftime_seconds). Omitting the flag falls back to
-    goal_this_end for goal-tapped clips too, same as before 2026-09-07."""
+    goal_this_end for goal-tapped clips too, same as before 2026-09-07.
+
+    With --camera-position center (2026-10-18; default `end` = unchanged): the
+    camera sits at midfield on the sideline and sees both goals, so the Gemini
+    prompt's "this (camera-side) end" wording becomes "either end"
+    (label_audit.describe_prompt_for), and EVERY genuine goal tap is review tier
+    1 (is_near_cam_goal=True) -- there is no far end to be unseen at.
+    --near-cam-team-first-half has no meaning there and is rejected. The describe
+    cache records the prompt variant, so an end-cam cache can't be reused.
+
+    With --no-sync-clap (2026-10-18): no mark is treated as the kickoff
+    clap-sync tap, so the chronologically-first `moment` keeps its review boost.
+    For a game with no clap (Oct-18); without the flag the first `moment` is
+    always assumed to be the clap.
+
+    Clip pipeline (2026-10-18), resumable: CLEAN clips are rendered into a local
+    work dir (default under the system temp dir, never Google Drive), Gemini
+    scores THOSE (it must never see an overlay), then each clip is re-encoded
+    with the crop-box outline for its action_region and the slow-mo dot
+    (review_overlay.py) and published into out_dir under its final name. The
+    sheet gains `action_region` and `slomo_center_s` (seconds from the clip's
+    own t=0). A rerun skips every clean render and overlay already done (ledger
+    signature + render.is_playable), re-overlaying only clips whose region/dot
+    changed, and never feeds a Review clip to Gemini."""
+    if camera_mode not in label_audit.CAMERA_POSITIONS:
+        raise SystemExit(f"--camera-position must be one of {label_audit.CAMERA_POSITIONS}, got {camera_mode!r}")
+    if camera_mode == "center" and near_cam_team_first_half is not None:
+        raise SystemExit(
+            "--near-cam-team-first-half is meaningless with --camera-position center (the camera sees both "
+            "goals, so every genuine goal tap is tier 1). Drop one of the two flags."
+        )
     if not os.environ.get(cfg.gemini.api_key_env):
         raise SystemExit(f"pre-label requires {cfg.gemini.api_key_env} to be set (for Gemini descriptions).")
 
@@ -763,6 +849,7 @@ def cmd_pre_label(
     mark_categories = [""] * len(merged)
     is_sync_claps = [False] * len(merged)
     is_near_cam_goals: list[bool | None] = [None] * len(merged)
+    owners: list[marks.ResolvedMark | None] = [None] * len(merged)
     score_columns: list[marks.ScoreColumns] | None = None
     pending_decrements: list[tuple[str, int]] = []
     if marks_csv or tally_csvs:
@@ -783,38 +870,21 @@ def cmd_pre_label(
         # (`source` alone can't: a moment mark that found no audio peak looks
         # identical to a goal mark that found no audio peak there).
         mark_categories = [owner.mark.category if owner else "" for _, _, owner in combined]
+        owners = [owner for _, _, owner in combined]
         # The clap-sync tap (Step 0c) is the game's chronologically-first
         # `moment` mark -- a timing reference, not a real candidate, so review
         # order must not give it the moment tiers' boost (Kaveh, 2026-09-06,
-        # after it ranked highly on a real game). Identified by the resolved
-        # mark itself, not by clip position, since a moment's fixed-window
-        # fallback can start well before the mark's own global_seconds.
-        moment_owners = [
-            (owner.global_seconds, id(owner))
-            for _, _, owner in combined
-            if owner is not None and owner.mark.category == "moment" and owner.global_seconds is not None
-        ]
-        sync_clap_owner_id = min(moment_owners)[1] if moment_owners else None
-        is_sync_claps = [
-            owner is not None and id(owner) == sync_clap_owner_id for _, _, owner in combined
-        ]
+        # after it ranked highly on a real game). --no-sync-clap (2026-10-18)
+        # turns that off for a game with no clap.
+        is_sync_claps = marks.sync_clap_flags(owners, enabled=not no_sync_clap)
         # Taps beat Gemini for review ordering (Kaveh, 2026-09-07): a genuine
         # goal tap's near-field status is decided by the per-game camera
         # setup, not goal_this_end. None (not False) when the flag or the
         # halftime boundary isn't available, so review_tier knows to fall
         # back to goal_this_end instead of treating it as a confirmed miss.
         halftime_seconds = detect_halftime_seconds(chunks) if near_cam_team_first_half else None
-        camera_config_complete = near_cam_team_first_half is not None and halftime_seconds is not None
         is_near_cam_goals = [
-            marks.is_near_cam_goal(owner.mark.category, owner.global_seconds, halftime_seconds, near_cam_team_first_half)
-            if (
-                camera_config_complete
-                and owner is not None
-                and owner.mark.category in ("white_goal", "black_goal")
-                and owner.global_seconds is not None
-            )
-            else None
-            for _, _, owner in combined
+            marks.near_cam_flag(owner, camera_mode, halftime_seconds, near_cam_team_first_half) for owner in owners
         ]
         events = marks.score_events(resolved)
         score_columns = [marks.score_for_interval(iv, events, owner) for iv, _, owner in combined]
@@ -874,19 +944,40 @@ def cmd_pre_label(
     # No bespoke lower-res tier: benchmarked at ~0.33x realtime on this
     # laptop (2026-07-28), so a full candidate batch renders in minutes,
     # not the hours that would justify a cheaper/lossier one-off tier.
-    with tempfile.TemporaryDirectory(prefix="soccer_hl_pre_label_") as tmp_dir_str:
-        tmp_dir = Path(tmp_dir_str)
-        for i, interval in enumerate(merged, start=1):
-            clip_path = strategy_dir / f"clip_{i:03d}.mp4"
-            print(f"Rendering {i}/{len(merged)}: {clip_path.name}")
-            slices = map_interval_to_chunks(interval, chunks)
-            render.render_review_clip(slices, clip_path, tmp_dir, cfg.review)
+    #
+    # 2026-10-18: render CLEAN clips into a local work dir first. Gemini scores
+    # those (it must never see the crop box / slow-mo dot), and only afterwards
+    # does the overlay pass publish the final clip into out_dir. The work dir is
+    # stable per out_dir (not a TemporaryDirectory) so an interrupted run keeps
+    # its finished renders; the ledger decides what may be skipped.
+    work = _pre_label_work_dir(out_dir, work_dir)
+    clean_dir = work / "clean"
+    clean_dir.mkdir(parents=True, exist_ok=True)
+    ledger = review_overlay.OverlayLedger(work / "pre_label_ledger.json")
+    print(f"Work dir (clean clips + resume ledger): {work}")
+    parts_dir = work / "parts"
+    parts_dir.mkdir(parents=True, exist_ok=True)
+    for i, interval in enumerate(merged, start=1):
+        clip_file = f"clip_{i:03d}.mp4"
+        clean_path = clean_dir / clip_file
+        signature = review_overlay.clean_signature(interval.start_seconds, interval.end_seconds)
+        if review_overlay.step_is_done(ledger, "clean", clip_file, signature, clean_path):
+            print(f"Rendering {i}/{len(merged)}: {clip_file} (clean clip already done, skipped)")
+            continue
+        print(f"Rendering {i}/{len(merged)}: {clip_file} (clean)")
+        slices = map_interval_to_chunks(interval, chunks)
+        render.render_review_clip(slices, clean_path, parts_dir, cfg.review)
+        ledger.record("clean", clip_file, signature)
+        ledger.forget("overlaid", clip_file)  # a re-rendered clean clip invalidates its overlay
 
+    slomo_centers = [
+        marks.slomo_center_seconds(interval, source, owner) for interval, source, owner in zip(merged, sources, owners)
+    ]
     rows = [
         label_audit.LabeledRow(
             strategy="candidates",
             clip_file=f"clip_{i:03d}.mp4",
-            clip_path=strategy_dir / f"clip_{i:03d}.mp4",
+            clip_path=clean_dir / f"clip_{i:03d}.mp4",
             interval=interval,
             verdict="",
             notes="",
@@ -895,10 +986,18 @@ def cmd_pre_label(
         for i, (interval, mark_category) in enumerate(zip(merged, mark_categories), start=1)
     ]
     cache_path = strategy_dir / "descriptions_cache.json"
-    describe_fn = functools.partial(label_audit.generate_description, fps=fps) if fps is not None else None
+    describe_kwargs: dict = {"camera_position": camera_mode}
+    if fps is not None:
+        describe_kwargs["fps"] = fps
+    describe_fn = functools.partial(label_audit.generate_description, **describe_kwargs)
     fps_note = f" at fps={fps} (override)" if fps is not None else ""
-    print(f"\nGenerating {len(rows)} Gemini description(s){fps_note} (cache: {cache_path})...")
-    descriptions = label_audit.run_describe_only(rows, cfg.gemini, cache_path, describe_fn=describe_fn)
+    print(
+        f"\nGenerating {len(rows)} Gemini description(s){fps_note}, {camera_mode}-camera prompt "
+        f"(cache: {cache_path})..."
+    )
+    descriptions = label_audit.run_describe_only(
+        rows, cfg.gemini, cache_path, describe_fn=describe_fn, prompt_variant=camera_mode
+    )
 
     sheet_path = generate_review_sheet(strategy_dir)
     with open(sheet_path, encoding="utf-8") as f:
@@ -909,14 +1008,16 @@ def cmd_pre_label(
         + ["source", "mark_category", "is_sync_clap", "is_near_cam_goal"]
         + score_headers
         + ["gemini_score", "goal_this_end", "gemini_caption", "gemini_description"]
+        + ["action_region", "slomo_center_s"]
         if sheet_rows
         else []
     )
     # sheet_rows, descriptions, sources, mark_categories, is_sync_claps,
     # is_near_cam_goals and score_columns are all in `merged` order.
     blank_scores = [None] * len(sheet_rows)
-    for sheet_row, description, source, mark_category, is_sync_clap, is_near_cam, score in zip(
-        sheet_rows, descriptions, sources, mark_categories, is_sync_claps, is_near_cam_goals, score_columns or blank_scores
+    for sheet_row, description, source, mark_category, is_sync_clap, is_near_cam, score, slomo in zip(
+        sheet_rows, descriptions, sources, mark_categories, is_sync_claps, is_near_cam_goals,
+        score_columns or blank_scores, slomo_centers,
     ):
         sheet_row["source"] = source
         sheet_row["mark_category"] = mark_category
@@ -934,11 +1035,52 @@ def cmd_pre_label(
         )
         sheet_row["gemini_caption"] = description.caption if description else ""
         sheet_row["gemini_description"] = description.description if description else ""
+        # Blank when unknown: no box is drawn / export falls back to no crop.
+        sheet_row["action_region"] = description.action_region if description and description.action_region else ""
+        sheet_row["slomo_center_s"] = "" if slomo is None else f"{slomo:.1f}"
     with open(sheet_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(sheet_rows)
+    print(f"\nWrote {len(merged)} candidate row(s) + {sheet_path}; now overlaying review clips into {strategy_dir}")
 
+    # Overlay pass AFTER the sheet is safely on disk, so an interrupt here costs
+    # only the clips not yet overlaid. One failing clip falls back to the clean
+    # clip in out_dir (no ledger entry, so the next run retries it).
+    n_done = n_skipped = 0
+    failed: list[str] = []
+    overlay_tmp = work / "overlay_tmp"
+    overlay_tmp.mkdir(parents=True, exist_ok=True)
+    for i, (interval, description, slomo) in enumerate(zip(merged, descriptions, slomo_centers), start=1):
+        clip_file = f"clip_{i:03d}.mp4"
+        region = description.action_region if description else None
+        signature = review_overlay.overlay_signature(
+            interval.start_seconds, interval.end_seconds, region, slomo, cfg.review_overlay, cfg.crop
+        )
+        final_path = strategy_dir / clip_file
+        if review_overlay.step_is_done(ledger, "overlaid", clip_file, signature, final_path):
+            n_skipped += 1
+            continue
+        print(f"Overlay {i}/{len(merged)}: {clip_file} region={region or '-'} slomo={slomo if slomo is not None else '-'}")
+        overlaid_path = overlay_tmp / clip_file
+        try:
+            review_overlay.overlay_review_clip(
+                clean_dir / clip_file, overlaid_path, region, slomo, cfg.crop, cfg.review_overlay, cfg.review, overlay_tmp
+            )
+            review_overlay.publish_file(overlaid_path, final_path)
+            ledger.record("overlaid", clip_file, signature)
+            n_done += 1
+        except Exception as exc:  # noqa: BLE001 -- one bad clip must not abort the batch
+            print(f"WARNING: overlay failed for {clip_file}: {exc} -- publishing the CLEAN clip instead")
+            ledger.forget("overlaid", clip_file)
+            review_overlay.publish_file(clean_dir / clip_file, final_path)
+            failed.append(clip_file)
+        finally:
+            overlaid_path.unlink(missing_ok=True)
+
+    print(f"Overlay pass: {n_done} encoded, {n_skipped} already done, {len(failed)} failed")
+    if failed:
+        print(f"*** {len(failed)} clip(s) are in {strategy_dir} WITHOUT overlay ({', '.join(failed[:5])}) -- rerun pre-label to retry ***")
     print(f"\nWrote {len(merged)} candidate clip(s) + {sheet_path} to {strategy_dir}")
 
 
@@ -1315,8 +1457,22 @@ def main() -> None:
     export_picks_parser.add_argument(
         "--review-sheet", required=True, help="Path to the review_sheet.csv containing the picked rows"
     )
+    picks_source = export_picks_parser.add_mutually_exclusive_group(required=True)
+    picks_source.add_argument(
+        "--clips", help="Comma-separated clip_file names to export, e.g. clip_055.mp4,clip_057.mp4"
+    )
+    picks_source.add_argument(
+        "--picks-file",
+        help="Text file, one pick per line: '<rank> [crop=left|center|right|full] [trim=N] [slomo|slomo=A-B|slomo=A-B@S|slomo@S]' "
+        "(e.g. 'r05 crop=left', 'r07 slomo=6.5-9', 'r09 slomo=4-7@0.5 crop=full', 'r04 trim=58'); '#' comments and blank lines ignored",
+    )
+    picks_source.add_argument(
+        "--picks", help="Same syntax as --picks-file, inline, picks separated by ';' (e.g. \"r03; r05 crop=left\")"
+    )
     export_picks_parser.add_argument(
-        "--clips", required=True, help="Comma-separated clip_file names to export, e.g. clip_055.mp4,clip_057.mp4"
+        "--no-crop",
+        action="store_true",
+        help="Ignore the sheet's action_region (export full frame unless a pick says crop=...)",
     )
     export_picks_parser.add_argument(
         "--out-dir", type=str, default=None, help="Override export.dir (where the compressed clips go)"
@@ -1455,6 +1611,26 @@ def main() -> None:
         "Swaps automatically after the auto-detected halftime gap. Drives review order's near-field-goal check ahead of Gemini's "
         "goal_this_end for any genuine goal tap. Omit to fall back to goal_this_end, same as before 2026-09-07",
     )
+    pre_label_parser.add_argument(
+        "--camera-position",
+        default="end",
+        choices=["end", "center"],
+        help="Where the camera sits: `end` (default; next to one goal, far end unseen) or `center` (midfield on "
+        "the sideline, both goals visible). `center` rewrites the Gemini prompt to 'either end', makes every "
+        "genuine goal tap review tier 1, and cannot be combined with --near-cam-team-first-half",
+    )
+    pre_label_parser.add_argument(
+        "--no-sync-clap",
+        action="store_true",
+        help="Treat NO mark as the kickoff clap-sync tap (default: the chronologically-first `moment` is assumed "
+        "to be the clap and loses its review boost). Use for a game with no clap",
+    )
+    pre_label_parser.add_argument(
+        "--work-dir",
+        default=None,
+        help="Local scratch dir for clean clips + the resume ledger (default: a stable folder under the system "
+        "temp dir, derived from --out-dir). Keep it off Google Drive",
+    )
 
     name_candidates_parser = subparsers.add_parser(
         "name-candidates",
@@ -1546,13 +1722,20 @@ def main() -> None:
     elif args.command == "export":
         cmd_export(cfg, args.out_dir, burn_in_time=not args.no_burn_in_time)
     elif args.command == "export-picks":
+        if args.picks_file:
+            pick_text = Path(args.picks_file).read_text(encoding="utf-8-sig")
+        elif args.picks:
+            pick_text = args.picks
+        else:
+            pick_text = "\n".join(c.strip() for c in args.clips.split(",") if c.strip())
         cmd_export_picks(
             cfg,
             args.review_sheet,
-            [c.strip() for c in args.clips.split(",")],
+            pick_text,
             args.out_dir,
             args.crf,
             burn_in_time=not args.no_burn_in_time,
+            use_sheet_crop=not args.no_crop,
         )
     elif args.command == "telegram-post":
         cmd_telegram_post(
@@ -1580,6 +1763,9 @@ def main() -> None:
             args.tally_csv,
             args.clock_offset_seconds,
             args.near_cam_team_first_half,
+            args.camera_position,
+            args.no_sync_clap,
+            args.work_dir,
         )
     elif args.command == "name-candidates":
         cmd_name_candidates(cfg, args.review_dir, args.revert)
