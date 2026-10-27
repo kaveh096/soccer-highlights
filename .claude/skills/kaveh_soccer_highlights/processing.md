@@ -817,7 +817,7 @@ pick format below to Kaveh, unprompted**, so he can write his picks in it
 order:
 
 ```
-<rank> [crop=left|center|right|full] [trim=N] [slomo | slomo=A-B | slomo=A-B@S | slomo@S]
+<rank> [crop=near|far|left|center|right|full] [trim=N] [slomo | slomo=A-B | slomo=A-B@S | slomo@S]
 
 r03                       # export as-is; crop = the sheet's action_region (the cyan box)
 r04 trim=58               # export [48s, 62s] around the goal; extended to cover the tap
@@ -829,6 +829,15 @@ r09 slomo=4-7@0.5 crop=full   # custom speed; full = no crop
 
 - `<rank>` = the `rNN` prefix of the rank-named review file (`r3` and a full
   `clip_file` name also work).
+- **`near` / `far` crops** (2026-10-26, end-cam games): explicit 16:9 boxes in
+  `crop.boxes` (`config/default.yaml`), signed off by Kaveh on a reference frame
+  of the Oct-25 field -- near = pop-up goal + area in front, far = far goal +
+  area in front. `pre-label` assigns them ONLY to goal-tapped clips, from the
+  tap team + halftime swap (`is_near_cam_goal`); every other clip gets no crop
+  (Gemini's thirds are a different geometry) unless a pick says `crop=near|far`.
+  Center-cam games still use Gemini's left/center/right. The boxes are tied to
+  one camera mount: re-draw and re-confirm on a frame if the framing changes.
+  Export width stays 2560, so the far box (~1440px of 4K) is upscaled ~1.8x.
 - The yellow dot in each review clip marks the default slow-mo center; the
   cyan box is the crop export will use unless `crop=` overrides it.
 - `trim=N` (2026-10-19), N = the second on the review clip's own timeline where

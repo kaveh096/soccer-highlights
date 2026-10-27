@@ -432,6 +432,11 @@ class CropConfig:
     # band sits mid-frame with a side-of-court camera, so 0.5 (window spans
     # 1/6..5/6) is the default; raise/lower it if a future setup sits lower/higher.
     y_center: float = 0.5
+    # Named windows as explicit (x0, y0, w, h) frame fractions (2026-10-26), e.g.
+    # `near` / `far` for an end-cam game. Unlike the left/center/right thirds
+    # these are tied to one camera mount, so they are set per field/setup in
+    # config/default.yaml. Empty = only the thirds exist.
+    boxes: dict[str, list[float]] = field(default_factory=dict)
 
 
 @dataclass
@@ -441,10 +446,10 @@ class ReviewOverlayConfig:
     the clip's action_region and one small dot marking the slow-mo centre.
     Review clips only -- exports never get either."""
 
-    # Dot: ~4% of frame width (was 1.5%, invisible on Oct-18), top-right corner, shown for dot_frames frames
+    # Dot: ~6% of frame width (was 1.5%, invisible on Oct-18; 4% before 2026-10-26), top-right corner, shown for dot_frames frames
     # centred on slomo_center_s. Yellow with a dark rim reads on grass, court and
     # both shirt colours.
-    dot_diameter_fraction: float = 0.04
+    dot_diameter_fraction: float = 0.06
     dot_margin_fraction: float = 0.012
     dot_frames: int = 36
     dot_color: str = "FFD600"

@@ -106,10 +106,18 @@ crop:
   width_fraction: 0.6666666666666666
   height_fraction: 0.6666666666666666
   y_center: 0.5
+  # Named windows as (x0, y0, w, h) frame fractions, 16:9 (2026-10-26, Kaveh
+  # signed off on a reference frame of the Oct-25 field). Used by end-cam games:
+  # a goal tap at the near goal crops `near`, at the far goal `far`; other clips
+  # get no crop unless a pick says `crop=near|far`. Tied to ONE camera mount --
+  # re-draw them (and re-confirm on a frame) if the camera is framed differently.
+  boxes:
+    near: [0.0, 0.073611, 0.73125, 0.73125]    # near pop-up goal + the area in front of it
+    far: [0.40625, 0.326389, 0.375, 0.375]     # far goal + the area in front of it
 
 review_overlay:
   # Burned into the 1280px review clips after Gemini scores the clean ones.
-  dot_diameter_fraction: 0.04   # was 0.015 -- Kaveh could not see it on Oct-18 (2026-10-19)
+  dot_diameter_fraction: 0.06   # was 0.015, then 0.04 -- Kaveh asked for a larger dot on 2026-10-26
   dot_margin_fraction: 0.012
   dot_frames: 36   # was 20 (~0.7s), too fast to notice; ~1.2s
   dot_color: "FFD600"

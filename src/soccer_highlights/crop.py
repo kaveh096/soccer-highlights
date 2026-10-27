@@ -15,6 +15,10 @@ from __future__ import annotations
 from soccer_highlights.config import CropConfig
 
 REGIONS = ("left", "center", "right")
+# Regions defined by explicit boxes in `CropConfig.boxes` (end-cam games: the
+# near goal and the far end). Valid on a pick / sheet row only when configured.
+BOXED_REGIONS = ("near", "far")
+ALL_REGIONS = (*REGIONS, *BOXED_REGIONS)
 # "full" = no crop; accepted by crop_rect so a caller (export's `crop=full`
 # override) can ask for it uniformly, but it is never a valid *detected* region.
 FULL = "full"
@@ -32,8 +36,34 @@ def crop_rect(region: str, cfg: CropConfig) -> tuple[float, float, float, float]
         raise ValueError(f"crop window fractions must be in (0, 1]: width={w}, height={h}")
     if region == FULL:
         return (0.0, 0.0, 1.0, 1.0)
+    if region in BOXED_REGIONS:
+        box = cfg.boxes.get(region)
+        if box is None:
+            raise ValueError(f"crop region {region!r} has no box in crop.boxes")
+        x0, y0, bw, bh = box
+        if not (bw > 0 and bh > 0 and x0 >= 0 and y0 >= 0 and x0 + bw <= 1 + 1e-9 and y0 + bh <= 1 + 1e-9):
+            raise ValueError(f"crop box {region!r} = {box} is outside the frame")
+        return (x0, y0, bw, bh)
     x0_by_region = {"left": 0.0, "center": (1.0 - w) / 2.0, "right": 1.0 - w}
     if region not in x0_by_region:
-        raise ValueError(f"unknown crop region {region!r} (expected one of {REGIONS} or {FULL!r})")
+        raise ValueError(f"unknown crop region {region!r} (expected one of {ALL_REGIONS} or {FULL!r})")
     y0 = min(max(cfg.y_center - h / 2.0, 0.0), 1.0 - h)
     return (x0_by_region[region], y0, w, h)
+
+
+def candidate_region(
+    camera_mode: str, is_near_cam_goal: bool | None, gemini_region: str | None, cfg: CropConfig
+) -> str | None:
+    """The `action_region` a review candidate gets (2026-10-26).
+
+    End-cam game with both `near` and `far` boxes configured: a goal tap whose
+    scoring end is known picks the box deterministically (near goal -> `near`,
+    far goal -> `far`); anything else gets NO crop, because Gemini's
+    left/center/right thirds describe a different geometry than these boxes.
+    Kaveh overrides with `crop=near|far` in his pick. Otherwise (center-cam, or
+    no boxes configured) Gemini's region passes through unchanged."""
+    if camera_mode == "end" and all(name in cfg.boxes for name in BOXED_REGIONS):
+        if is_near_cam_goal is None:
+            return None
+        return "near" if is_near_cam_goal else "far"
+    return gemini_region

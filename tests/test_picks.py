@@ -10,6 +10,7 @@ from soccer_highlights.picks import (
     clip_ranks,
     default_slomo_window,
     load_picks,
+    row_region,
     parse_picks,
     resolve_picks,
 )
@@ -187,3 +188,10 @@ def test_load_picks_reports_syntax_and_resolution_errors_together():
     with pytest.raises(PickError) as exc:
         load_picks("r03 crop=top\nr99\nr05 slomo", ROWS)
     assert len(exc.value.errors) == 3
+
+
+def test_near_and_far_are_valid_crop_choices_and_sheet_regions():
+    specs = parse_picks("r01 crop=near; r02 crop=FAR")
+    assert [s.crop for s in specs] == ["near", "far"]
+    assert row_region({"action_region": "near"}) == "near"
+    assert row_region({"action_region": "far"}) == "far"

@@ -1,7 +1,7 @@
 import pytest
 
 from soccer_highlights.config import CropConfig
-from soccer_highlights.crop import crop_rect
+from soccer_highlights.crop import candidate_region, crop_rect
 
 
 def test_default_window_is_two_thirds_square_of_the_frame():
@@ -39,3 +39,34 @@ def test_crop_rect_full_is_the_whole_frame_and_unknown_region_raises():
         crop_rect("top", CropConfig())
     with pytest.raises(ValueError):
         crop_rect("left", CropConfig(width_fraction=1.5))
+
+
+def _boxed_cfg() -> CropConfig:
+    return CropConfig(boxes={"near": [0.0, 0.073611, 0.73125, 0.73125], "far": [0.40625, 0.326389, 0.375, 0.375]})
+
+
+def test_boxed_regions_return_their_configured_rect():
+    cfg = _boxed_cfg()
+    assert crop_rect("near", cfg) == (0.0, 0.073611, 0.73125, 0.73125)
+    x0, y0, w, h = crop_rect("far", cfg)
+    assert (round(x0 * 1280), round(y0 * 720), round(w * 1280), round(h * 720)) == (520, 235, 480, 270)
+
+
+def test_boxed_region_without_a_box_or_outside_the_frame_raises():
+    with pytest.raises(ValueError, match="no box"):
+        crop_rect("near", CropConfig())
+    with pytest.raises(ValueError, match="outside the frame"):
+        crop_rect("near", CropConfig(boxes={"near": [0.5, 0.0, 0.73, 0.73]}))
+
+
+def test_candidate_region_end_cam_uses_the_goal_end_not_gemini():
+    cfg = _boxed_cfg()
+    assert candidate_region("end", True, "left", cfg) == "near"
+    assert candidate_region("end", False, "left", cfg) == "far"
+    assert candidate_region("end", None, "left", cfg) is None  # no goal tap -> no crop, thirds don't apply
+
+
+def test_candidate_region_passes_gemini_through_for_center_cam_or_unconfigured_boxes():
+    assert candidate_region("center", True, "right", _boxed_cfg()) == "right"
+    assert candidate_region("end", True, "right", CropConfig()) == "right"
+    assert candidate_region("end", True, "right", CropConfig(boxes={"near": [0, 0, 0.5, 0.5]})) == "right"

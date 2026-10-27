@@ -136,6 +136,7 @@ from soccer_highlights import (
 )
 from soccer_highlights.audio import extract_audio_samples
 from soccer_highlights.config import Config, load_config, load_strategy_configs
+from soccer_highlights.crop import candidate_region
 from soccer_highlights.detection import analyze
 from soccer_highlights.discovery import Chunk, detect_halftime_seconds, discover_chunks
 from soccer_highlights.golden import GoldenScore, load_golden_events, score_intervals_against_golden
@@ -1036,7 +1037,9 @@ def cmd_pre_label(
         sheet_row["gemini_caption"] = description.caption if description else ""
         sheet_row["gemini_description"] = description.description if description else ""
         # Blank when unknown: no box is drawn / export falls back to no crop.
-        sheet_row["action_region"] = description.action_region if description and description.action_region else ""
+        sheet_row["action_region"] = candidate_region(
+            camera_mode, is_near_cam, description.action_region if description else None, cfg.crop
+        ) or ""
         sheet_row["slomo_center_s"] = "" if slomo is None else f"{slomo:.1f}"
     with open(sheet_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -1051,9 +1054,11 @@ def cmd_pre_label(
     failed: list[str] = []
     overlay_tmp = work / "overlay_tmp"
     overlay_tmp.mkdir(parents=True, exist_ok=True)
-    for i, (interval, description, slomo) in enumerate(zip(merged, descriptions, slomo_centers), start=1):
+    for i, (interval, description, slomo, is_near_cam) in enumerate(
+        zip(merged, descriptions, slomo_centers, is_near_cam_goals), start=1
+    ):
         clip_file = f"clip_{i:03d}.mp4"
-        region = description.action_region if description else None
+        region = candidate_region(camera_mode, is_near_cam, description.action_region if description else None, cfg.crop)
         signature = review_overlay.overlay_signature(
             interval.start_seconds, interval.end_seconds, region, slomo, cfg.review_overlay, cfg.crop
         )

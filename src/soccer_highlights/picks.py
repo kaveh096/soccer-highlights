@@ -40,10 +40,10 @@ import re
 from dataclasses import dataclass
 
 from soccer_highlights.config import TrimConfig
-from soccer_highlights.crop import REGIONS, CropConfig, crop_rect
+from soccer_highlights.crop import ALL_REGIONS, CropConfig, crop_rect
 
 FULL = "full"
-CROP_CHOICES = (*REGIONS, FULL)
+CROP_CHOICES = (*ALL_REGIONS, FULL)
 
 # 0.25x of the 119.88fps source at the 30fps export rate is true 4x slow-mo
 # from real frames, no interpolation (decision 2026-10-18).
@@ -123,7 +123,7 @@ class ResolvedPick:
 
     clip_file: str
     row: dict[str, str]
-    region: str  # left | center | right | full
+    region: str  # left | center | right | near | far | full
     slomo: SlowMo | None
     trim: TrimWindow | None = None  # None = export the row's whole [start, end]
 
@@ -298,7 +298,7 @@ def row_region(row: dict[str, str]) -> str:
     """The sheet's action_region, or `full` when blank/absent/unrecognised
     (an older sheet has no such column; that must mean no crop, not an error)."""
     value = (row.get("action_region") or "").strip().lower()
-    return value if value in REGIONS else FULL
+    return value if value in ALL_REGIONS else FULL
 
 
 def row_slomo_center(row: dict[str, str]) -> float | None:
