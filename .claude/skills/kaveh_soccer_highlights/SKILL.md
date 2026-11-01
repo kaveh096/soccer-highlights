@@ -284,7 +284,7 @@ marks) -> posted to a Telegram group with the Farsi caption.
   Gemini), and cover only goal-tapped clips by default; see processing.md Step 3.
   Camera-mount specific -- confirm them on a frame at the start of a new setup.
 - **Slow-mo is a replay appended after the live clip, picked per clip by
-  Kaveh** (2026-10-18). Default window [dot-2s, dot+1s] at 0.25x = 12s of
+  Kaveh** (2026-10-18). Default window [dot-3.5s, dot+1s] at 0.25x = 18s of
   replay, true 4x from the 120fps source. The yellow dot in each review clip
   marks the slow-mo center -- ONE dot (audio peak, else tap - 3s), because
   showing peak and tap separately was rejected as confusing. The replay

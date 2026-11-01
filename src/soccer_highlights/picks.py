@@ -51,7 +51,7 @@ DEFAULT_SLOMO_SPEED = 0.25
 # Default replay window around slomo_center_s: more lead than tail, because the
 # centre is the audio peak / tap-derived estimate of the strike and the run-up
 # is the part worth seeing slowly.
-SLOMO_LEAD_SECONDS = 2.0
+SLOMO_LEAD_SECONDS = 3.5
 SLOMO_TAIL_SECONDS = 1.0
 # Slower than this is a multi-minute encode for a few seconds of footage; above
 # 1.0 would not be slow motion at all.

@@ -131,21 +131,21 @@ def test_sheet_without_the_new_columns_still_works():
     assert out[0].region == "full" and out[0].slomo is None
 
 
-def test_default_slomo_window_is_2s_before_to_1s_after_the_centre():
-    assert default_slomo_window(9.0, 14.0) == (7.0, 10.0)
+def test_default_slomo_window_is_3_5s_before_to_1s_after_the_centre():
+    assert default_slomo_window(9.0, 14.0) == (5.5, 10.0)
 
 
 def test_default_slomo_window_is_clamped_to_the_clip():
     assert default_slomo_window(1.0, 14.0) == (0.0, 2.0)
-    assert default_slomo_window(13.5, 14.0) == (11.5, 14.0)
+    assert default_slomo_window(13.5, 14.0) == (10.0, 14.0)
     assert default_slomo_window(40.0, 14.0) is None  # centre far outside the clip
 
 
 def test_slomo_uses_the_sheet_centre_and_default_speed():
     pick = resolve_picks(parse_picks("r03 slomo"), ROWS)[0]
-    assert pick.slomo == SlowMo(7.0, 10.0, DEFAULT_SLOMO_SPEED)
-    assert pick.slomo.source_seconds == 3.0
-    assert pick.slomo.output_seconds == 12.0
+    assert pick.slomo == SlowMo(5.5, 10.0, DEFAULT_SLOMO_SPEED)
+    assert pick.slomo.source_seconds == 4.5
+    assert pick.slomo.output_seconds == 18.0
 
 
 def test_slomo_default_window_near_clip_start_is_clamped():

@@ -279,6 +279,19 @@ What to read off the output:
   a lot of them is worth checking `score_flip_cap_seconds` or the game's
   press-lag assumptions before running Step 1.
 
+**No clap and an unsynced camera (Oct-25, 2026-10-29)**: `ingest-marks`' clap
+residual is meaningless then (it treated a real `moment` as the clap, +29s).
+Estimate the skew from the goal taps instead: sweep a window offset `c` over the
+audio peaks around each goal tap and look for the one where the strongest peaks
+repeatedly sit (Oct-25: c = +10.5 s, 5/8 goal taps, z = 5.2 vs random taps).
+Peaks trail the tap by `skew - tap_delay`, so the offset to pass is c + 2-3 s
+(Oct-25: **+12 s**, confirmed by Kaveh on three test clips -- the goal landed on
+the yellow dot). Symptoms of a big skew: the dot sits 10-20 s before the goal,
+tapped clips (the whole top of the ranking) look dull, and taps snap to the
+wrong peak. Fix = `--clock-offset-seconds` on `pre-label` (it shifts MARKS only,
+never the camera timeline); rerun on a fresh Review folder (the describe cache is
+position-keyed). Prevention: sync the camera RTC to the phone, and clap at kickoff.
+
 ### Step 0d -- infer the camera position (`infer-camera`)
 
 **Skip this step when the camera is at center field** (Kaveh says so; pass
@@ -822,7 +835,7 @@ order:
 r03                       # export as-is; crop = the sheet's action_region (the cyan box)
 r04 trim=58               # export [48s, 62s] around the goal; extended to cover the tap
 r05 crop=left             # the box was wrong -> override the crop
-r07 slomo                 # replay [dot-2s, dot+1s] at 0.25x, appended after the clip
+r07 slomo                 # replay [dot-3.5s, dot+1s] at 0.25x, appended after the clip
 r07 slomo=6.5-9           # custom window, seconds on the review clip's own timeline
 r09 slomo=4-7@0.5 crop=full   # custom speed; full = no crop
 ```
@@ -1108,8 +1121,12 @@ clips also keeps any single failure cheap, and the sent-file makes resuming free
 before, now always do this).** Kaveh uploads the full, unedited game
 footage to a Google Drive folder and wants a short Farsi text message
 posted to the group pointing players at it, separate from the per-clip
-highlight posts. Ask him for the Drive folder's share link if you don't
-have it yet -- don't skip this step for not having it, ask. Use
+highlight posts. **The share link is the same for every game** (Kaveh,
+2026-10-31) and lives in Claude's private memory
+(`reference_raw_footage_drive_link.md`), NOT in this repo -- the GitHub repo is
+public, and the link would expose the players' footage. Read it from memory; if
+memory is unavailable, ask him. The game's footage must already be in its
+`Raw\` folder on Drive before the message goes out. Use
 `telegram-message` (added 2026-08-31), not `telegram-post` -- this is a
 one-off plain-text `sendMessage`, no video attachment:
 

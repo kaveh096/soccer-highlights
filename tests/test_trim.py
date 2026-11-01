@@ -97,8 +97,8 @@ def test_picks_without_trim_resolve_exactly_as_before():
     plain = resolve_picks(parse_picks("r04 slomo"), [row])[0]
     assert plain.trim is None
     assert plain.export_seconds() == (1000.0, 1080.0)
-    assert plain.slomo == SlowMo(7.0, 10.0, 0.25)
-    assert plain.describe() == "crop=full slomo=7-10@0.25"
+    assert plain.slomo == SlowMo(5.5, 10.0, 0.25)
+    assert plain.describe() == "crop=full slomo=5.5-10@0.25"
 
 
 # --- trim_window ---------------------------------------------------------------
@@ -194,17 +194,17 @@ def test_rebase_without_a_flip_is_the_same_score():
 def test_trimmed_slomo_is_centred_on_n_not_on_the_sheet_dot():
     row = _row(length=100.0, center="9.0")
     pick = resolve_picks(parse_picks("r04 trim=58 slomo"), [row])[0]
-    assert pick.slomo == SlowMo(56.0, 59.0, 0.25)  # original review-clip timeline
+    assert pick.slomo == SlowMo(54.5, 59.0, 0.25)  # original review-clip timeline
 
 
 def test_trimmed_slomo_needs_no_sheet_centre():
     pick = resolve_picks(parse_picks("r04 trim=58 slomo"), [_row(length=100.0, center="")])[0]
-    assert pick.slomo == SlowMo(56.0, 59.0, 0.25)
+    assert pick.slomo == SlowMo(54.5, 59.0, 0.25)
 
 
 def test_untrimmed_slomo_still_uses_the_sheet_centre():
     pick = resolve_picks(parse_picks("r04 slomo"), [_row(length=100.0, center="9.0")])[0]
-    assert pick.slomo == SlowMo(7.0, 10.0, 0.25)
+    assert pick.slomo == SlowMo(5.5, 10.0, 0.25)
 
 
 def test_trimmed_slomo_default_is_clamped_to_the_clip():
@@ -252,9 +252,9 @@ def test_export_picks_cuts_the_trimmed_interval_and_rebases_the_score(monkeypatc
     assert [(s.local_start_seconds, s.local_end_seconds) for s in slices] == [(1048.0, 1067.5)]
     assert live_score == ScoreOverlay(2, 1, flip_seconds=18.0, flip_team="white")
     assert full_score == ScoreOverlay(2, 1, flip_seconds=66.0, flip_team="white")
-    # Replay: window [56, 59] on the original timeline, mapped from the full row interval.
+    # Replay: window [54.5, 59] on the original timeline, mapped from the full row interval.
     (piece,) = render.replay_pieces(replay)
-    assert (piece.start, piece.duration, piece.clip_offset) == (1056.0, 3.0, 56.0)
+    assert (piece.start, piece.duration, piece.clip_offset) == (1054.5, 4.5, 54.5)
 
 
 def test_export_picks_without_trim_passes_the_whole_row_interval(monkeypatch, tmp_path):
