@@ -63,7 +63,15 @@ def test_candidate_region_end_cam_uses_the_goal_end_not_gemini():
     cfg = _boxed_cfg()
     assert candidate_region("end", True, "left", cfg) == "near"
     assert candidate_region("end", False, "left", cfg) == "far"
-    assert candidate_region("end", None, "left", cfg) is None  # no goal tap -> no crop, thirds don't apply
+    assert candidate_region("end", None, "left", cfg) is None  # no goal tap, no wide box -> no crop, thirds don't apply
+
+
+def test_candidate_region_non_goal_clip_gets_wide_when_configured():
+    cfg = CropConfig(boxes={**_boxed_cfg().boxes, "wide": [0.35, 0.25, 0.55, 0.55]})
+    assert candidate_region("end", None, "left", cfg) == "wide"
+    assert candidate_region("end", True, "left", cfg) == "near"  # a goal tap keeps its own side
+    assert candidate_region("end", False, "left", cfg) == "far"
+    assert crop_rect("wide", cfg) == (0.35, 0.25, 0.55, 0.55)
 
 
 def test_candidate_region_passes_gemini_through_for_center_cam_or_unconfigured_boxes():

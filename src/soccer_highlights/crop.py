@@ -16,8 +16,9 @@ from soccer_highlights.config import CropConfig
 
 REGIONS = ("left", "center", "right")
 # Regions defined by explicit boxes in `CropConfig.boxes` (end-cam games: the
-# near goal and the far end). Valid on a pick / sheet row only when configured.
-BOXED_REGIONS = ("near", "far")
+# near goal, the far end, and `wide` = the whole field, the default for any clip
+# that has no goal side of its own). Valid on a pick / sheet row only when configured.
+BOXED_REGIONS = ("near", "far", "wide")
 ALL_REGIONS = (*REGIONS, *BOXED_REGIONS)
 # "full" = no crop; accepted by crop_rect so a caller (export's `crop=full`
 # override) can ask for it uniformly, but it is never a valid *detected* region.
@@ -58,12 +59,13 @@ def candidate_region(
 
     End-cam game with both `near` and `far` boxes configured: a goal tap whose
     scoring end is known picks the box deterministically (near goal -> `near`,
-    far goal -> `far`); anything else gets NO crop, because Gemini's
-    left/center/right thirds describe a different geometry than these boxes.
-    Kaveh overrides with `crop=near|far` in his pick. Otherwise (center-cam, or
-    no boxes configured) Gemini's region passes through unchanged."""
-    if camera_mode == "end" and all(name in cfg.boxes for name in BOXED_REGIONS):
+    far goal -> `far`); anything else gets the `wide` whole-field box when one
+    is configured (2026-11-01), else NO crop -- Gemini's left/center/right
+    thirds describe a different geometry than these boxes. Kaveh overrides with
+    `crop=near|far|wide|full` in his pick. Otherwise (center-cam, or no boxes
+    configured) Gemini's region passes through unchanged."""
+    if camera_mode == "end" and all(name in cfg.boxes for name in ("near", "far")):
         if is_near_cam_goal is None:
-            return None
+            return "wide" if "wide" in cfg.boxes else None
         return "near" if is_near_cam_goal else "far"
     return gemini_region

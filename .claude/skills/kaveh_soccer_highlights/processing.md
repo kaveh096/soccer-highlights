@@ -292,6 +292,24 @@ wrong peak. Fix = `--clock-offset-seconds` on `pre-label` (it shifts MARKS only,
 never the camera timeline); rerun on a fresh Review folder (the describe cache is
 position-keyed). Prevention: sync the camera RTC to the phone, and clap at kickoff.
 
+**DST Sunday (Nov-01, 2026-11-01)**: the camera is synced the night BEFORE; on the
+fall-back Sunday it stays on PDT while the phone/watch (and so the tally epochs,
+converted with `RECORDING_TZ`) are on PST -> the camera filenames are exactly **one
+hour ahead** -> pass `--clock-offset-seconds 3600` to `ingest-marks`, `pre-label`
+and `timelapse_render.py`. Confirm it: ~60% of the taps should snap to an audio
+peak and the first taps should land minutes (not -55 min) into chunk 1. The
+burned-in clock and the `NNNa` tag in clip names then show CAMERA time (an hour ahead of
+real time); that is cosmetic. Spring-forward is the mirror image (-3600).
+
+**Continuous recording through halftime** (the camera is not paused): chunks are
+back to back, so `detect_halftime_seconds` finds no real gap and returns a bogus
+filename-rounding boundary (Nov-01: 5280s, the chunk 5/6 seam), which silently
+mis-tiers every second-half goal. Find the empty-field stretch on a contact sheet
+(`ffmpeg -skip_frame nokey -i chunk.LRF -vf "fps=1/60,scale=320:-1,tile=6x3"`, one
+per candidate chunk) and pass any second inside it as `pre-label --halftime-seconds`
+(Nov-01: 3000, empty field 2540-3530). `infer-camera` has no override: skip it and
+ask Kaveh (or use the same contact sheet) for the camera side.
+
 ### Step 0d -- infer the camera position (`infer-camera`)
 
 **Skip this step when the camera is at center field** (Kaveh says so; pass
@@ -368,6 +386,42 @@ red/white locator finds nothing need `--goal-box`; a continuous recording
 (Sep-27: chunks back to back, halftime has no gap) can only be answered from
 the first chunk. Needs `.MP4`+`.LRF` pairs (Sep-06's `Raw\` has `.LRF` only
 -> `discover_chunks` finds nothing).
+
+### Step 0e -- confirm the crop boxes on a reference frame (REQUIRED before Step 1)
+
+**Every end-cam game, before `pre-label`, without being asked** (Kaveh, 2026-11-01).
+`pre-label` bakes each clip's crop region into the sheet and draws the cyan box
+into every review clip; exports resolve `crop.boxes` at render time. The boxes
+are tied to ONE camera mount, and the mount changes week to week (Oct-25 -> Nov-01
+the camera was further back and the near goal moved from the left edge to the
+right edge, so the old near box would have cut it off). Skipping this step costs a
+15-minute overlay re-render or stale cyan boxes for the whole review. Skip it
+only for `--camera-position center` games (Gemini's thirds, no boxes).
+
+1. Pull 1-2 frames from a chunk's `.LRF` with players at both ends (one `ffmpeg
+   -ss <t> -i x.LRF -frames:v 1` per frame, ~1280x720, seconds on a card read).
+2. Read off, in frame pixels: the near goal (mouth + net + pole), the far goal
+   (usually a tiny orange rectangle), the court's corners, and the baseline.
+3. Draw 3 candidates per box, all 16:9 (`[x0, y0, s, s]`: width and height are the
+   SAME fraction, which keeps the aspect), and send Kaveh one image per box: full
+   frame with the boxes on top, the crop each would produce underneath. He picks.
+   - `near`: the goal + pole + near corner + the field in front of it; anchor it to
+     the side the goal is on; end it at the baseline (no foreground tarmac).
+   - `far`: the goal + the corner(s) + the field in front of it; tight is fine
+     (export upscales ~2x).
+   - `wide`: the whole field with both goals, centred on the field, not on a goal.
+     This is the DEFAULT crop for every clip that has no goal side of its own
+     (moments, audio-only, a tap without a known end).
+4. Write the three boxes into `crop.boxes` in `config/default.yaml` (keep the
+   previous values in the comment), run `pytest tests/test_crop.py`, then Step 1.
+
+How a clip gets its region (`crop.candidate_region`): goal tap -> `near`/`far` from
+the tap team + halftime swap; anything else -> `wide`. `crop=near|far|wide|full` in
+a pick overrides. If boxes were changed AFTER `pre-label` already ran, exports pick
+up the new boxes automatically (names resolve at export), blank `action_region` rows
+need to become `wide` (patch `review_sheet.csv`, back it up first) and the cyan
+boxes in the review clips stay stale unless the overlay pass is re-run
+(`name-candidates --revert`, `pre-label` again, `name-candidates`; ~15 min).
 
 ### Step 1 -- detect candidates + Gemini describe (`pre-label`)
 
@@ -830,7 +884,7 @@ pick format below to Kaveh, unprompted**, so he can write his picks in it
 order:
 
 ```
-<rank> [crop=near|far|left|center|right|full] [trim=N] [slomo | slomo=A-B | slomo=A-B@S | slomo@S]
+<rank> [crop=near|far|wide|left|center|right|full] [trim=N] [slomo | slomo=A-B | slomo=A-B@S | slomo@S]
 
 r03                       # export as-is; crop = the sheet's action_region (the cyan box)
 r04 trim=58               # export [48s, 62s] around the goal; extended to cover the tap
@@ -845,9 +899,10 @@ r09 slomo=4-7@0.5 crop=full   # custom speed; full = no crop
 - **`near` / `far` crops** (2026-10-26, end-cam games): explicit 16:9 boxes in
   `crop.boxes` (`config/default.yaml`), signed off by Kaveh on a reference frame
   of the Oct-25 field -- near = pop-up goal + area in front, far = far goal +
-  area in front. `pre-label` assigns them ONLY to goal-tapped clips, from the
-  tap team + halftime swap (`is_near_cam_goal`); every other clip gets no crop
-  (Gemini's thirds are a different geometry) unless a pick says `crop=near|far`.
+  area in front. `pre-label` assigns near/far to goal-tapped clips, from the
+  tap team + halftime swap (`is_near_cam_goal`); every other clip gets `wide`
+  (2026-11-01, the whole field; Gemini's thirds are a different geometry) unless a
+  pick says `crop=near|far|wide|full`.
   Center-cam games still use Gemini's left/center/right. The boxes are tied to
   one camera mount: re-draw and re-confirm on a frame if the framing changes.
   Export width stays 2560, so the far box (~1440px of 4K) is upscaled ~1.8x.
@@ -1221,3 +1276,6 @@ cd C:/dev/soccer-highlights
 | Farsi caption reads fine but contains a non-word (e.g. "شواب" for "شوت") | Gemini emits wrong-but-valid characters, not only `?` mojibake | Read captions in the Step 5 dry-run; fix in `post_sheet.csv` |
 | Exports far slower than the same work idle | A Drive copy/sync or another agent competing for the CPU | Run heavy jobs one at a time (Step 4: ~10x realtime idle vs ~18 min/clip contended on Oct-04) |
 | MP4s won't fit on Drive/local disk for a same-day game | Full-res chunks are ~17GB each | Point `--source-dir` straight at the memory card (e.g. `D:/DCIM/DJI_001`) instead of copying to Drive -- copy just the small `.LRF` proxies there too (`robocopy ... *.LRF`) so `discover_chunks` finds matching pairs; keep `--out-dir`/tally CSV paths on Drive as usual. Card reads are local, not subject to the Google-Drive-path slowness this skill otherwise warns about |
+| Every tap lands ~55 min before the camera's first chunk / "marked but not recorded" on a DST Sunday | Camera synced before the clock change, still on the old offset; tallies are true local time | `--clock-offset-seconds +3600` (fall back) / `-3600` (spring forward), Step 0c |
+| Second-half goals tiered as near/far wrongly on a game with no halftime pause | `detect_halftime_seconds` returned a filename-rounding boundary (no recording gap) | `pre-label --halftime-seconds <empty-field second>`, Step 0c |
+| Review-clip cyan boxes / exports cut the goal off | `crop.boxes` were drawn for a different camera mount | Step 0e before every end-cam `pre-label` |

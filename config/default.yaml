@@ -106,14 +106,17 @@ crop:
   width_fraction: 0.6666666666666666
   height_fraction: 0.6666666666666666
   y_center: 0.5
-  # Named windows as (x0, y0, w, h) frame fractions, 16:9 (2026-10-26, Kaveh
-  # signed off on a reference frame of the Oct-25 field). Used by end-cam games:
-  # a goal tap at the near goal crops `near`, at the far goal `far`; other clips
-  # get no crop unless a pick says `crop=near|far`. Tied to ONE camera mount --
-  # re-draw them (and re-confirm on a frame) if the camera is framed differently.
+  # Named windows as (x0, y0, w, h) frame fractions, 16:9. Used by end-cam games:
+  # a goal tap at the near goal crops `near`, at the far goal `far`; every other
+  # clip crops `wide` (the whole field) unless a pick says `crop=...`. Tied to
+  # ONE camera mount -- re-draw them and re-confirm on a reference frame before
+  # every game (SKILL.md Step 0e). Current values: Nov-01 mount (camera further
+  # back than Oct-25; the Oct-25 values were near [0.0, 0.073611, 0.73125,
+  # 0.73125], far [0.40625, 0.326389, 0.375, 0.375]).
   boxes:
-    near: [0.0, 0.073611, 0.73125, 0.73125]    # near pop-up goal + the area in front of it
-    far: [0.40625, 0.326389, 0.375, 0.375]     # far goal + the area in front of it
+    near: [0.45, 0.269444, 0.55, 0.55]          # near pop-up goal + ~360px of field in front (N2)
+    far: [0.375, 0.444444, 0.3, 0.3]            # far goal + the left sideline corner (F1)
+    wide: [0.351563, 0.245833, 0.552, 0.552]    # the whole field, both goals (N1 + 15%, re-centred)
 
 review_overlay:
   # Burned into the 1280px review clips after Gemini scores the clean ones.

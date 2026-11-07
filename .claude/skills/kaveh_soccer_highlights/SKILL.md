@@ -279,10 +279,12 @@ marks) -> posted to a Telegram group with the Farsi caption.
   scoring). The cyan box burned into each review clip is the human gate --
   Kaveh corrects a wrong region with `crop=` in his pick line. Auto-pan from
   motion on the `.LRF` is the possible v2 if static crops prove too loose.
-- **End-cam games crop to `near`/`far` boxes, not thirds** (2026-10-26). Boxes
-  come from `crop.boxes`, are chosen from the goal tap + halftime swap (never
-  Gemini), and cover only goal-tapped clips by default; see processing.md Step 3.
-  Camera-mount specific -- confirm them on a frame at the start of a new setup.
+- **End-cam games crop to `near`/`far`/`wide` boxes, not thirds** (2026-10-26, `wide`
+  added 2026-11-01). Boxes come from `crop.boxes`; near/far are chosen from the goal
+  tap + halftime swap (never Gemini), every other clip gets `wide` (the whole field),
+  see processing.md Step 3. **Camera-mount specific: Step 0e (confirm all three on a
+  reference frame, Kaveh picks from 3 candidates each) is REQUIRED before every
+  end-cam `pre-label`** -- Nov-01's mount differed from Oct-25's.
 - **Slow-mo is a replay appended after the live clip, picked per clip by
   Kaveh** (2026-10-18). Default window [dot-3.5s, dot+1s] at 0.25x = 18s of
   replay, true 4x from the 120fps source. The yellow dot in each review clip

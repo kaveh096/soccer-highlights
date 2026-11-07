@@ -757,6 +757,7 @@ def cmd_pre_label(
     camera_mode: str = "end",
     no_sync_clap: bool = False,
     work_dir: str | None = None,
+    halftime_seconds_override: float | None = None,
 ) -> None:
     """Detect candidates in a brand-new (not-yet-labeled) recording,
     render small/fast clips, generate a Gemini description for each (no
@@ -883,7 +884,12 @@ def cmd_pre_label(
         # setup, not goal_this_end. None (not False) when the flag or the
         # halftime boundary isn't available, so review_tier knows to fall
         # back to goal_this_end instead of treating it as a confirmed miss.
-        halftime_seconds = detect_halftime_seconds(chunks) if near_cam_team_first_half else None
+        # A continuous recording (camera left running through halftime) has no
+        # gap for detect_halftime_seconds to find; the override supplies it.
+        if halftime_seconds_override is not None:
+            halftime_seconds = halftime_seconds_override
+        else:
+            halftime_seconds = detect_halftime_seconds(chunks) if near_cam_team_first_half else None
         is_near_cam_goals = [
             marks.near_cam_flag(owner, camera_mode, halftime_seconds, near_cam_team_first_half) for owner in owners
         ]
@@ -1468,7 +1474,7 @@ def main() -> None:
     )
     picks_source.add_argument(
         "--picks-file",
-        help="Text file, one pick per line: '<rank> [crop=left|center|right|full] [trim=N] [slomo|slomo=A-B|slomo=A-B@S|slomo@S]' "
+        help="Text file, one pick per line: '<rank> [crop=left|center|right|near|far|wide|full] [trim=N] [slomo|slomo=A-B|slomo=A-B@S|slomo@S]' "
         "(e.g. 'r05 crop=left', 'r07 slomo=6.5-9', 'r09 slomo=4-7@0.5 crop=full', 'r04 trim=58'); '#' comments and blank lines ignored",
     )
     picks_source.add_argument(
@@ -1615,6 +1621,14 @@ def main() -> None:
         "OPPOSITE of the team whose own goal the camera is behind (camera behind white's goal -> pass black). "
         "Swaps automatically after the auto-detected halftime gap. Drives review order's near-field-goal check ahead of Gemini's "
         "goal_this_end for any genuine goal tap. Omit to fall back to goal_this_end, same as before 2026-09-07",
+    )
+    pre_label_parser.add_argument(
+        "--halftime-seconds",
+        type=float,
+        default=None,
+        help="Global-timeline second where the second half starts, for a continuous recording with no gap between "
+        "chunks at halftime (the auto-detector then picks a meaningless filename-rounding gap). Find it on a "
+        "contact sheet; any second inside the empty-field stretch works",
     )
     pre_label_parser.add_argument(
         "--camera-position",
@@ -1771,6 +1785,7 @@ def main() -> None:
             args.camera_position,
             args.no_sync_clap,
             args.work_dir,
+            args.halftime_seconds,
         )
     elif args.command == "name-candidates":
         cmd_name_candidates(cfg, args.review_dir, args.revert)
