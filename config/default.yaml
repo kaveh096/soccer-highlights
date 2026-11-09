@@ -110,13 +110,16 @@ crop:
   # a goal tap at the near goal crops `near`, at the far goal `far`; every other
   # clip crops `wide` (the whole field) unless a pick says `crop=...`. Tied to
   # ONE camera mount -- re-draw them and re-confirm on a reference frame before
-  # every game (SKILL.md Step 0e). Current values: Nov-01 mount (camera further
-  # back than Oct-25; the Oct-25 values were near [0.0, 0.073611, 0.73125,
-  # 0.73125], far [0.40625, 0.326389, 0.375, 0.375]).
+  # every game (SKILL.md Step 0e). Current values: Nov-08 mount (near goal at the
+  # right frame edge, far pop-up goal left of centre; Kaveh picked near B, far A,
+  # wide D = one step wider than C so the left court lines are in). Previous
+  # mount, Nov-01: near [0.45, 0.269444, 0.55, 0.55], far [0.375, 0.444444, 0.3,
+  # 0.3], wide [0.351563, 0.245833, 0.552, 0.552]. Oct-25: near [0.0, 0.073611,
+  # 0.73125, 0.73125], far [0.40625, 0.326389, 0.375, 0.375].
   boxes:
-    near: [0.45, 0.269444, 0.55, 0.55]          # near pop-up goal + ~360px of field in front (N2)
-    far: [0.375, 0.444444, 0.3, 0.3]            # far goal + the left sideline corner (F1)
-    wide: [0.351563, 0.245833, 0.552, 0.552]    # the whole field, both goals (N1 + 15%, re-centred)
+    near: [0.55, 0.34, 0.45, 0.45]              # near goal at the right edge + field in front (B)
+    far: [0.37, 0.40, 0.25, 0.25]               # tiny far pop-up goal + field in front (A, tight)
+    wide: [0.20, 0.20, 0.80, 0.80]              # the whole field, both goals, left lines (D)
 
 review_overlay:
   # Burned into the 1280px review clips after Gemini scores the clean ones.
