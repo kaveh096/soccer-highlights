@@ -100,12 +100,16 @@ cost-tracking purposes, not shared personal keys.
 
 ## Part 2: Data location and folder structure
 
-All game footage lives on Google Drive, per game date, **not** in the repo
-(`repo/output` and `repo/testdata` were removed once this reorg happened):
+Per-game outputs live on Google Drive, per game date, **not** in the repo
+(`repo/output` and `repo/testdata` were removed once this reorg happened).
+**Raw video is NOT on Drive any more (Kaveh, 2026-11-08):** it stays on the memory
+card (`--source-dir`, see Step 0). Games before 2026-11-08 still have their video
+in `Raw\`:
 
 ```
 G:\My Drive\Photos and Movies\Sunday Soccer\<date>\
-  Raw\                              DJI_*_D.MP4 + .LRF  (capital "Raw")
+  Raw\                              tally CSVs only since 2026-11-08 (capital "Raw"); older
+                                    games also hold DJI_*_D.MP4 + .LRF here
     tally_white_goal.csv            the three Tallies watch exports, one per
     tally_black_goal.csv            counter -- live-tagged marks for this game
     tally_moment.csv                (see Step 0b; absent if the watch wasn't used)
@@ -145,7 +149,8 @@ now is). Nothing migrated: every command takes explicit paths, so
 --review-sheet`, `telegram-post --clips-dir` etc. simply point at the old folders.
 
 Every command below needs an explicit `--source-dir` (global CLI flag, points at
-`Raw\`, or at the memory card -- see Step 0) and/or `SOCCER_HL__...` env var
+the memory card for the whole game, e.g. `D:/DCIM/DJI_001` -- see Step 0; an older
+game's `Raw\` on Drive works the same way) and/or `SOCCER_HL__...` env var
 override -- `config/default.yaml`'s defaults still point at old repo-relative
 paths that no longer exist.
 
@@ -161,38 +166,31 @@ export/post straight off the ranked sheet -- `gemini_score` plus a quick skim of
 deliberately; don't treat an unlabeled `review_sheet.csv` as unfinished, and
 don't assume a sheet with posted clips has ground-truth verdicts in it.
 
-### Step 0 -- get footage onto Drive (AFTER the heavy jobs, not before)
+### Step 0 -- point `--source-dir` at the memory card (raw video is NOT copied to Drive)
 
-Every DJI `DJI_*_D.MP4` + `.LRF` on the card ends up in
-`G:\My Drive\Photos and Movies\Sunday Soccer\<date>\Raw\` -- but **don't copy
-first**. Point `--source-dir` at the memory card (`D:/DCIM/DJI_001`, card reads
-are local) for Step 0c/1/6 and the Step 4 exports, then copy the whole card in
-the one stretch of the flow that is otherwise idle CPU: **while Kaveh reviews
-and picks clips**. Never run the Drive copy at the same time as `pre-label`, the
-timelapse or the exports (this laptop has 2 cores and Drive sync competes; see
-Step 4's idle-vs-contended note).
+**Standing preference, Kaveh 2026-11-08: raw videos are no longer copied to Google
+Drive** (it takes too long to sync and has little value). The card is the
+source for the WHOLE game: `--source-dir "D:/DCIM/DJI_001"` (adjust the drive
+letter) for Step 0c/0d/1/1b/1d/6 and the Step 4 exports. **The card must stay
+inserted until the exports are done** -- don't let Kaveh reformat or reuse it
+before then. Card reads are local, so none of the Google-Drive-path slowness
+this skill otherwise warns about applies to the video. Only the tiny tally CSVs
+go into `<date>\Raw\` on Drive (Step 0b: `tally_white_goal.csv`,
+`tally_black_goal.csv`, `tally_moment.csv`); outputs (`Review\`, `Share\`) stay on
+Drive as before.
 
-Worked example, Oct-11 (the order that worked): `ingest-marks` -> `pre-label`
-(~45 min, card as source) -> `name-candidates` -> timelapse phase 1 (~20 min) ->
-`robocopy` LRFs then MP4s in chunk order (41 GB, ~12 min on the Drive mirror)
-while Kaveh reviewed -> exports from the card -> post clips -> timelapse ->
-raw-footage message (Step 5b) last, once Drive's cloud upload finished. The
-tally CSVs go straight into `Raw\` at Step 0b regardless -- they're tiny.
-```bash
-robocopy "D:\DCIM\DJI_001" "G:\My Drive\Photos and Movies\Sunday Soccer\<date>\Raw" *.LRF /R:5 /W:15 /NP
-robocopy "D:\DCIM\DJI_001" "G:\My Drive\Photos and Movies\Sunday Soccer\<date>\Raw" *.MP4 /R:5 /W:15 /NP
-```
-(robocopy exit code 1 = files copied, not failure.) Afterwards verify byte
-sizes card vs. Drive for every file. `robocopy` returning only means the local
-Drive mirror has the file -- Drive's own upload to the cloud can still be
-running, so wait for it before posting a share link.
+Worked example (the order to follow): `ingest-marks` (Step 0c) -> camera
+position (0d) -> crop boxes confirmed (0e) -> late taps retimed + the pre-flight
+checklist (Step 1) -> `pre-label` (~45 min, card as source) -> `name-candidates`
+(1b) -> **whole-game timelapse (Step 6, ~20 min idle, every game)** -> print the
+pick format; Kaveh reviews and picks -> exports from the card -> post clips ->
+post the timelapse -> Step 5b message (flagged, see there). The timelapse is the
+one heavy job between 1b and review; don't start anything else heavy alongside it.
 
-If Drive sync is flaky reading freshly-uploaded `.LRF` files from `Raw\` (seen
-as ffmpeg `0xC0000006 STATUS_IN_PAGE_ERROR`), use `--lrf-cache-dir` in Step 1
-to redirect heavy reads to a local copy:
-```bash
-robocopy "G:\...\<date>\Raw" "C:\local\lrf\<date>" *.LRF /R:5 /W:15
-```
+**Older games only** (footage already on Drive): if Drive sync is flaky reading
+freshly-uploaded `.LRF` files from `Raw\` (seen as ffmpeg `0xC0000006
+STATUS_IN_PAGE_ERROR`), pass `--lrf-cache-dir "C:/local/lrf/<date>"` to `pre-label`
+and `robocopy` the `.LRF`s there first. A card source needs none of this.
 
 ### Step 0b -- ASK KAVEH FOR THE WATCH TALLY EXPORTS
 
@@ -210,15 +208,17 @@ The ritual, for reference:
 1. On the watch, Tallies exports **one CSV per counter**, so there are
    **three** files: white goal, black goal, moment.
 2. They land in Google Drive under whatever name Tallies gives them (a
-   free-form string like `soccer tally test - white goal - Sep 2.csv`).
-3. **Rename them to the stable convention** and put them in the game's `Raw\`
-   folder next to the DJI files: `tally_white_goal.csv`,
+   free-form string like `soccer tally test - white goal - Sep 2.csv`) -- often
+   in the game's date folder rather than in `Raw\`.
+3. **Copy them under the stable convention** into the game's `Raw\` folder
+   (keep the Drive-export originals where they are): `tally_white_goal.csv`,
    `tally_black_goal.csv`, `tally_moment.csv`. Nothing parses the filename --
    the category is passed explicitly on the command line -- but a stable name
    is what makes the Step 0c/Step 1 commands copy-pasteable between games.
 
-Putting them in `Raw\` is safe: `discover_chunks` globs `DJI_*_D.MP4` only and
-ignores everything else in the folder.
+Since 2026-11-08 `Raw\` holds only these three CSVs (the video stays on the card);
+`discover_chunks` globs `DJI_*_D.MP4` only, so on an older game that still has
+video in `Raw\` they sit there harmlessly.
 
 **If the tallies are missing**, say so plainly and carry on -- everything below
 degrades to audio-only exactly as before. Don't silently skip the `--tally-csv`
@@ -243,7 +243,7 @@ pass.
 export PATH="/c/Users/Kaveh/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-8.1.2-full_build/bin:$PATH"
 cd C:/dev/soccer-highlights
 ./.venv/Scripts/python.exe -m soccer_highlights.cli \
-  --source-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Raw" \
+  --source-dir "D:/DCIM/DJI_001" \
   ingest-marks \
   --tally-csv "white_goal=G:/.../<date>/Raw/tally_white_goal.csv" \
   --tally-csv "black_goal=G:/.../<date>/Raw/tally_black_goal.csv" \
@@ -325,7 +325,7 @@ camera see" every game -- ask only when it comes back inconclusive.
 export PATH="/c/Users/Kaveh/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-8.1.2-full_build/bin:$PATH"
 cd C:/dev/soccer-highlights
 ./.venv/Scripts/python.exe -m soccer_highlights.cli \
-  --source-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Raw" \
+  --source-dir "D:/DCIM/DJI_001" \
   infer-camera --out-dir "C:/local/scratch/camera_<date>" \
   [--frames 36] [--goal-box x0,y0,x1,y1]
 ```
@@ -391,6 +391,10 @@ the first chunk. Needs `.MP4`+`.LRF` pairs (Sep-06's `Raw\` has `.LRF` only
 ### Step 0e -- confirm the crop boxes on a reference frame (REQUIRED before Step 1)
 
 **Every end-cam game, before `pre-label`, without being asked** (Kaveh, 2026-11-01).
+This is one half of the standing preference **"Don't re-render review overlays"**
+(Kaveh, 2026-11-08): everything baked into the review overlays (crop boxes, dot
+colour/position, tap times, halftime) must be final BEFORE `pre-label`; see the
+pre-flight checklist at the top of Step 1.
 `pre-label` bakes each clip's crop region into the sheet and draws the cyan box
 into every review clip; exports resolve `crop.boxes` at render time. The boxes
 are tied to ONE camera mount, and the mount changes week to week (Oct-25 -> Nov-01
@@ -426,14 +430,32 @@ boxes in the review clips stay stale unless the overlay pass is re-run
 
 ### Step 1 -- detect candidates + Gemini describe (`pre-label`)
 
+**Pre-flight checklist -- go through it before launching** (Kaveh, 2026-11-08:
+**"Don't re-render review overlays."** Everything baked into the review clips
+-- crop boxes, dot colour and position, tap times, halftime -- must be final
+BEFORE `pre-label`, because fixing any of it afterwards means the ~15 min
+overlay pass again plus a rename round-trip):
+
+1. **Clock skew** known (Step 0c; `--clock-offset-seconds`, DST Sundays).
+2. **Camera side** known (Step 0d `infer-camera`, or `--camera-position center`).
+3. **Halftime second** known -- on a continuous recording (no gap between
+   chunks) get it from a contact sheet and pass `--halftime-seconds`.
+4. **Crop boxes confirmed** on a reference frame (Step 0e), end-cam games.
+5. **Late taps retimed** in the working tally CSV (Step 1c, "retime before
+   `pre-label`"); original kept as `tally_*.orig.csv`.
+6. **Decrement handling** checked: the `ingest-marks` WARNING lines for each
+   cancelled press glanced at, and any unresolvable decrement settled with
+   Kaveh (`DECREMENTS_PENDING.txt`, SKILL.md settled decisions).
+7. **No other heavy job running** (`Get-CimInstance Win32_Process | Where-Object
+   Name -match 'ffmpeg|python'`; no Drive sync burst, no other agent).
+
 ```bash
 export PATH="/c/Users/Kaveh/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-8.1.2-full_build/bin:$PATH"
 cd C:/dev/soccer-highlights
 ./.venv/Scripts/python.exe -m soccer_highlights.cli \
-  --source-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Raw" \
+  --source-dir "D:/DCIM/DJI_001" \
   pre-label \
   --out-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Review" \
-  [--lrf-cache-dir "C:/local/lrf/<date>"] \
   [--tally-csv "white_goal=G:/.../<date>/Raw/tally_white_goal.csv"] \
   [--tally-csv "black_goal=G:/.../<date>/Raw/tally_black_goal.csv"] \
   [--tally-csv "moment=G:/.../<date>/Raw/tally_moment.csv"] \
@@ -584,11 +606,10 @@ $env:PATH = "C:\Users\Kaveh\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_
 $env:PYTHONUNBUFFERED = "1"
 $argList = @(
   "-u", "-m", "soccer_highlights.cli",
-  "--source-dir", '"G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Raw"',
+  "--source-dir", '"D:/DCIM/DJI_001"',
   "pre-label",
   "--out-dir", '"G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Review"',
-  "--fps", "15",
-  "--lrf-cache-dir", '"C:/local/lrf/<date>"'
+  "--fps", "15"
 )
 Start-Process -FilePath "C:\dev\soccer-highlights\.venv\Scripts\python.exe" -ArgumentList $argList `
   -WorkingDirectory "C:\dev\soccer-highlights" `
@@ -607,13 +628,15 @@ that's the thing being worked around. Use a fresh pair of `-Redirect*` log
 filenames per retry round (`_out2.log`, `_out3.log`, ...) so you can tell
 rounds apart.
 
-Separately: on a same-day freshly-uploaded game, reading `.LRF`/`.MP4`
-directly off the Google Drive path during detection can be extremely slow
+Separately, **for an older game whose footage is on Drive** (a card source is
+local and doesn't have this problem): on a same-day freshly-uploaded game,
+reading `.LRF`/`.MP4` directly off the Google Drive path during detection can be
+extremely slow
 (one Aug-30 attempt sat for 20+ min with zero output before being killed,
 `ffprobe` metadata reads were fast (~1.7s) but the ffmpeg audio-decode child
 hadn't even started yet) -- always do the `robocopy ... *.LRF` local-cache
-step (already documented at Step 0/Step 1's `--lrf-cache-dir`) proactively for
-a same-day game, not just when you actually see the `STATUS_IN_PAGE_ERROR`
+step (Step 0's older-games note, `--lrf-cache-dir`) proactively for
+a same-day Drive-hosted game, not just when you actually see the `STATUS_IN_PAGE_ERROR`
 symptom. `robocopy` exits with code 1 on a normal successful copy (its
 convention for "files copied", not failure) -- don't read that as an error.
 
@@ -667,7 +690,7 @@ stale the moment another describe retry lands).
 
 ```bash
 ./.venv/Scripts/python.exe -m soccer_highlights.cli \
-  --source-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Raw" \
+  --source-dir "D:/DCIM/DJI_001" \
   name-candidates \
   --review-dir "G:/.../<date>/Review"
 ```
@@ -703,12 +726,24 @@ genuine goal tap is tier 1 (both goals are in view).
   durations only, so media time drifts from real time by however long the camera
   was stopped (41.5 min across a 110.3 min window on Aug-23). The tag re-anchors
   through each chunk's own filename timestamp so it matches what you remember.
+- **Any clip added to the folder later must also get an `rNN_`-style prefix** so
+  the Review folder still sorts in review order. `name-candidates` only names
+  the rows that are in `review_sheet.csv` when it runs: it ranks them by the
+  tiered sort and writes `r{rank:02d}_s{score}_{clock}_c{id}.mp4` (`r01`, `r02`,
+  ...). Goal-search `gsNN_` clips (Step 1d) and merged/derived rows (Step 4b)
+  are not in that rename, and a bare `gs01_...` sorts BEFORE `r01_...` in A-Z
+  order -- so give each one an `rNN_` name that puts it where Kaveh should see
+  it, rather than re-running `name-candidates` (which reshuffles every rank).
 - `--revert` restores canonical names and round-trips byte-identically. **Run it
   before re-running `pre-label` on an already-renamed folder** -- `pre-label`
   re-renders to canonical names and would otherwise leave both namings side by
   side and trip the cache mismatch check.
 - Renaming after posting would break `.telegram_sent.json`'s double-post
   protection (it keys on `clip_file`). Order is always rename -> export -> post.
+
+**Next: launch the whole-game timelapse (Step 6) now** -- it runs every game
+(Kaveh, 2026-11-08), after `name-candidates` and BEFORE Kaveh starts reviewing,
+as the one heavy job at this point.
 
 ### Step 1c -- tap-vs-Gemini check (do this before ranking is trusted)
 
@@ -725,6 +760,16 @@ tapped ~22s late. `c011` (`source=mark`, `black_goal`) scored 2 and described
 routine midfield play; `c012` (`source=both`, `white_goal`) scored 1 and
 described the goalkeeper taking off his gloves. The real goal was ~22s before
 the tap; the clip started 8s after it.
+
+**Retime late taps BEFORE `pre-label`, not after** (Kaveh, 2026-11-08). The tap
+time is baked into the clip window, the dot position and the score flip, which
+are all burned into the review overlays. When a tap is known to be late (Kaveh
+says so, or an earlier look at the footage shows it), edit that CLICK row's
+`timestamp` (epoch ms) in the working copy `Raw\tally_*.csv` to about 3 s after
+the real goal (the pipeline assumes taps trail the event by ~3 s), and keep the
+untouched export as `tally_*.orig.csv` -- never edit the original export itself.
+The cheaper fixes below (post_sheet rows, goal-search) are for taps found late
+after the review clips already exist.
 
 **The rule:** every row with a genuine goal tap (`mark_category` in
 `white_goal`/`black_goal`, i.e. `source` `mark` or `both`) whose
@@ -776,7 +821,7 @@ seconds are the review sheet's `start_seconds` axis.
 export PATH="/c/Users/Kaveh/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-8.1.2-full_build/bin:$PATH"
 cd C:/dev/soccer-highlights
 ./.venv/Scripts/python.exe .claude/skills/kaveh_soccer_highlights/scripts/goal_search.py \
-  --source-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Raw" \
+  --source-dir "D:/DCIM/DJI_001" \
   --start-seconds 0 --end-seconds 660 \
   --camera-note "camera behind white's goal in the first half, black attacks the near goal" \
   --out-dir "C:/local/scratch/goal_search_<date>"
@@ -879,9 +924,9 @@ final word. **This is the actual decision step** -- Kaveh watches the
 higher-ranked clips directly and picks off the ranked order +
 `gemini_description`/caption text; nothing is written back to the sheet.
 
-**When candidates are ready for review (after Step 1b/1c), Claude prints the
-pick format below to Kaveh, unprompted**, so he can write his picks in it
-(added 2026-10-18). One line per pick, rank first, optional tokens in any
+**When candidates are ready for review (after Step 1b/1c, and once the Step 6
+timelapse is rendered or at least launched), Claude prints the pick format below
+to Kaveh, unprompted**, so he can write his picks in it (added 2026-10-18). One line per pick, rank first, optional tokens in any
 order:
 
 ```
@@ -926,11 +971,15 @@ r09 slomo=4-7@0.5 crop=full   # custom speed; full = no crop
 
 ### Step 4 -- export share-quality clips (`export-picks`)
 
+**Sources come from the memory card** (`--source-dir "D:/DCIM/DJI_001"`; raw video is
+not on Drive since 2026-11-08) -- confirm the card is still inserted and readable
+before starting, and keep it in until every export is done.
+
 ```bash
 export PATH="/c/Users/Kaveh/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-8.1.2-full_build/bin:$PATH"
 cd C:/dev/soccer-highlights
 ./.venv/Scripts/python.exe -m soccer_highlights.cli \
-  --source-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Raw" \
+  --source-dir "D:/DCIM/DJI_001" \
   export-picks \
   --review-sheet "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Review/review_sheet.csv" \
   --picks-file "G:/.../<date>/Review/picks.txt" \
@@ -1091,7 +1140,7 @@ until it prints `DONE`:
 
 ```bash
 ./.venv/Scripts/python.exe .claude/skills/kaveh_soccer_highlights/scripts/seg_render.py \
-  --source-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Raw" \
+  --source-dir "D:/DCIM/DJI_001" \
   --review-sheet "G:/.../post_sheet.csv" \
   --clip "r30_31_s2_821a_c025_c026.mp4" --crf 24 \
   --out-dir "C:/local/scratch/export" [--seg-seconds 11.0] [--max-segments 1]
@@ -1174,6 +1223,12 @@ clips also keeps any single failure cheap, and the sent-file makes resuming free
 
 ### Step 5b -- announce where the raw footage lives (`telegram-message`)
 
+> **FLAG (2026-11-08): raw video is no longer copied to Drive, so this message
+> no longer matches reality for new games.** Do NOT send it as-is and do NOT
+> write new Farsi text: ask Kaveh what the message should say now (or whether
+> to send one at all). The template and mechanics below are kept unchanged for
+> when he confirms.
+
 **Standard, every game (settled 2026-09-08 -- was "optional/occasional"
 before, now always do this).** Kaveh uploads the full, unedited game
 footage to a Google Drive folder and wants a short Farsi text message
@@ -1182,8 +1237,8 @@ highlight posts. **The share link is the same for every game** (Kaveh,
 2026-10-31) and lives in Claude's private memory
 (`reference_raw_footage_drive_link.md`), NOT in this repo -- the GitHub repo is
 public, and the link would expose the players' footage. Read it from memory; if
-memory is unavailable, ask him. The game's footage must already be in its
-`Raw\` folder on Drive before the message goes out. Use
+memory is unavailable, ask him. (Until Kaveh confirms the new wording, the "footage must already be in
+its `Raw\` folder on Drive" condition no longer holds for new games.) Use
 `telegram-message` (added 2026-08-31), not `telegram-post` -- this is a
 one-off plain-text `sendMessage`, no video attachment:
 
@@ -1208,15 +1263,22 @@ fixed script):
 <Google Drive folder link>
 ```
 
-### Step 6 (optional) -- whole-game timelapse (`timelapse_render.py`)
+### Step 6 -- whole-game timelapse, EVERY game (`timelapse_render.py`)
 
-**Not part of the normal weekly flow -- only do this if Kaveh explicitly asks for a timelapse.** Added 2026-09-29 after a 25-minute single-chunk prototype landed well ("fun", "one funny clip to share"). Speeds the ENTIRE game's recorded footage (every chunk, back to back) down to a short clip (Kaveh's first full-game ask: 40s), with the real scoreboard/clock burned in and a real-speed audio snippet laid under it, sized to fit Telegram's 50MB cap.
+**Runs every game (Kaveh, 2026-11-08; was "optional, only on request"): right after
+`name-candidates` (Step 1b) and BEFORE Kaveh starts reviewing, as the one heavy job
+at that point** -- it is numbered 6 because it was added last, not because it comes
+last. Added 2026-09-29 after a 25-minute single-chunk prototype landed well ("fun",
+"one funny clip to share"). Speeds the ENTIRE game's recorded footage (every chunk,
+back to back) down to a short clip (Kaveh's first full-game ask: 40s), with the real
+scoreboard/clock burned in and a real-speed audio snippet laid under it, sized to
+fit Telegram's 50MB cap. Sources from the memory card like every other step.
 
 ```bash
 export PATH="/c/Users/Kaveh/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-8.1.2-full_build/bin:$PATH"
 cd C:/dev/soccer-highlights
 ./.venv/Scripts/python.exe .claude/skills/kaveh_soccer_highlights/scripts/timelapse_render.py \
-  --source-dir "G:/My Drive/Photos and Movies/Sunday Soccer/<date>/Raw" \
+  --source-dir "D:/DCIM/DJI_001" \
   --tally-csv "white_goal=G:/.../<date>/Raw/tally_white_goal.csv" \
   --tally-csv "black_goal=G:/.../<date>/Raw/tally_black_goal.csv" \
   --clock-offset-seconds <from Step 0c, usually omit> \
@@ -1265,7 +1327,7 @@ cd C:/dev/soccer-highlights
 | `source` column absent or all `audio` | `--tally-csv` flags weren't passed to `pre-label` | Re-run Step 1 with them; don't read a `source`-less sheet as "the watch found nothing" |
 | Clap sync reports no peak near the moment mark | Clap not detected, or skew exceeds the search window | Check the camera RTC sync actually took before trusting that game's marks |
 | Marks reported "marked but not recorded" | Tapped while the camera was stopped between chunks | Nothing to render -- report them, don't let them silently vanish |
-| `pre-label` detection hangs with zero output on a same-day game | Reading `.LRF`/`.MP4` straight off Drive for a freshly-uploaded game can be very slow | `robocopy` the `.LRF`s local first (`--lrf-cache-dir`) proactively, don't wait for the `STATUS_IN_PAGE_ERROR` symptom |
+| `pre-label` detection hangs with zero output on a same-day game | Reading `.LRF`/`.MP4` straight off Drive for a freshly-uploaded game can be very slow (older games only; a card `--source-dir` is local) | `robocopy` the `.LRF`s local first (`--lrf-cache-dir`) proactively, don't wait for the `STATUS_IN_PAGE_ERROR` symptom |
 | A detached `pre-label` process looks dead (`Get-Process -Id <launcher_pid>` shows 0% CPU or nothing) but the log is still growing | The venv `python.exe` launcher PID is a stub; the real work runs in a CHILD process with a different PID | Check `Get-CimInstance Win32_Process \| Where-Object {$_.Name -eq 'python.exe'}` for the real worker, or just compare the log/cache file's `LastWriteTime` to now -- recent write means alive, full stop |
 | A PowerShell `Where-Object {$_.CommandLine -match ...}` filter via the Bash tool's nested `-Command` string returns empty even though the process is alive | Backslash-escaping `\$_` inside the Bash tool's double-quoted `-Command` string breaks the filter silently | Don't escape `$_`; if it still misbehaves, skip the filter and just check `LastWriteTime` |
 | Full 5-chunk audio decode gets OOM-killed | This laptop has only 8GB RAM, and other concurrent work (browser, other Claude sessions, other scripts) eats into the ~4GB typically free | Don't re-run `_run_detection`/`extract_audio_samples` just to recompute categories/provenance -- reconstruct from `events.json`'s cached peaks instead (no decode), cross-checking against the sheet's real `source` column before trusting it |
@@ -1277,7 +1339,9 @@ cd C:/dev/soccer-highlights
 | Gemini describe `The read operation timed out` on ~1/3 of clips | 60s `gemini.request_timeout_seconds` default is too short for fps=10 video uploads | `SOCCER_HL__GEMINI__REQUEST_TIMEOUT_SECONDS=420`; retry only the failed rows via `run_describe_only` in a scratch script, not a full `pre-label` re-run (Step 1). Hit 2026-10-04: 20/61 failed, 17 recovered at 240s, last 3 at 420s |
 | Farsi caption reads fine but contains a non-word (e.g. "شواب" for "شوت") | Gemini emits wrong-but-valid characters, not only `?` mojibake | Read captions in the Step 5 dry-run; fix in `post_sheet.csv` |
 | Exports far slower than the same work idle | A Drive copy/sync or another agent competing for the CPU | Run heavy jobs one at a time (Step 4: ~10x realtime idle vs ~18 min/clip contended on Oct-04) |
-| MP4s won't fit on Drive/local disk for a same-day game | Full-res chunks are ~17GB each | Point `--source-dir` straight at the memory card (e.g. `D:/DCIM/DJI_001`) instead of copying to Drive -- copy just the small `.LRF` proxies there too (`robocopy ... *.LRF`) so `discover_chunks` finds matching pairs; keep `--out-dir`/tally CSV paths on Drive as usual. Card reads are local, not subject to the Google-Drive-path slowness this skill otherwise warns about |
+| Where do the raw MP4/.LRF live for a new game? | Since 2026-11-08 raw video is NOT copied to Drive (slow sync, little value) | `--source-dir` = the memory card (`D:/DCIM/DJI_001`) for the whole game, card stays inserted until exports are done; only the tally CSVs go to `<date>\Raw\` (Step 0) |
 | Every tap lands ~55 min before the camera's first chunk / "marked but not recorded" on a DST Sunday | Camera synced before the clock change, still on the old offset; tallies are true local time | `--clock-offset-seconds +3600` (fall back) / `-3600` (spring forward), Step 0c |
 | Second-half goals tiered as near/far wrongly on a game with no halftime pause | `detect_halftime_seconds` returned a filename-rounding boundary (no recording gap) | `pre-label --halftime-seconds <empty-field second>`, Step 0c |
 | Review-clip cyan boxes / exports cut the goal off | `crop.boxes` were drawn for a different camera mount | Step 0e before every end-cam `pre-label` |
+| Tally CSVs sit in the game folder under Drive-export names, not in `Raw\` | Tallies/Drive exports use free-form names and land next to the date folder | Copy them into `Raw\` as `tally_white_goal.csv` / `tally_black_goal.csv` / `tally_moment.csv`; keep the originals untouched (Step 0b) |
+| A tap landed minutes after the real goal (clip starts after the ball is in, dot and score flip in the wrong place) | Overlays, dot position and score flips are baked from the TAP time at `pre-label` | RETIME that CLICK row in the working `tally_*.csv` BEFORE `pre-label`; never edit the original export, keep it as `tally_*.orig.csv` (Step 1c). Retiming after the fact means re-running the overlay pass |

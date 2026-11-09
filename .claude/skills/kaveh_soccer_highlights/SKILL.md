@@ -20,9 +20,11 @@ Telegram clips, with exact commands and folder structure.
 - `seg_render.py` -- **weekly workflow** (processing.md Step 4). Exports one
   share-quality clip in resumable segments, for clips too long to finish in a
   single run on this laptop. Reach for it whenever a pick is longer than ~15s.
-- `timelapse_render.py` -- **optional, only on request** (processing.md Step 6).
-  Speeds the whole game down to a short clip with the scoreboard/clock burned
-  in. Not part of the normal weekly flow -- only run it if Kaveh asks.
+- `timelapse_render.py` -- **weekly workflow, every game** (processing.md Step 6;
+  Kaveh, 2026-11-08, was "optional, only on request"). Speeds the whole game
+  down to a short clip with the scoreboard/clock burned in. Runs after
+  `name-candidates` (Step 1b) and BEFORE Kaveh starts reviewing, as the one heavy
+  job at that point.
 - `goal_search.py` -- **weekly workflow, only when the tap-vs-Gemini check
   says so** (processing.md Step 1c -> 1d). Scans a stretch of `.LRF` footage
   with Gemini for goals no rendered clip contains (typically a late tap) and
@@ -201,7 +203,8 @@ marks) -> posted to a Telegram group with the Farsi caption.
   it into an unattended input to `pre-label`.
 - **A game folder has exactly three subfolders: `Raw\`, `Review\`, `Share\`**
   (Kaveh's call, 2026-10-12; first used for the Oct-11 game). Named after what
-  you *do* in them: `Raw\` = inputs (card MP4/LRF + `tally_*.csv`), `Review\`
+  you *do* in them: `Raw\` = inputs (`tally_*.csv` only since 2026-11-08; the video stays on
+  the memory card), `Review\`
   = everything `pre-label` writes and a human picks from -- FLAT (rank-named
   clips, `review_sheet.csv`, `post_sheet.csv`, `events.json`,
   `descriptions_cache.json`, `DECREMENTS_PENDING.txt`, `gsNN_` goal-search
@@ -233,6 +236,20 @@ marks) -> posted to a Telegram group with the Farsi caption.
   mis-taps were never fixed before export and the posted clips showed black
   at 12 instead of 10 -- hence the gate for what cannot be resolved
   automatically.)
+- **Standing workflow preferences, Kaveh 2026-11-08** (details in processing.md):
+  1. **Whole-game timelapse every game**, after `name-candidates`, before review
+     (Step 6). Print the pick format once it is rendered or at least launched.
+  2. **Raw videos are NOT copied to Google Drive** (slow sync, little value).
+     `--source-dir` is the memory card for the whole game (Step 0c/0d/1/1b/1d/6
+     and the Step 4 exports); the card stays inserted until exports are done.
+     Only the tiny `tally_*.csv` files go into `<date>\Raw\` on Drive.
+  3. **Don't re-render review overlays.** Everything baked into them (crop boxes,
+     dot colour/position, tap times, halftime) must be final BEFORE `pre-label`:
+     retime late taps, confirm crop boxes and halftime first (pre-flight checklist
+     at the top of Step 1).
+  4. **Any clip added to Review\ later** (goal-search `gsNN_`, merged/derived
+     rows) must be given an `rNN_`-style prefix, or the folder stops sorting in
+     review order (`name-candidates` only names the sheet's rows).
 - **Taps outside their own clip are now reported, not just discoverable in
   hindsight** (`marks.marks_outside_their_clip`, added 2026-09-08). A tap
   that lands outside its owning candidate's rendered window (even after
@@ -250,7 +267,10 @@ marks) -> posted to a Telegram group with the Farsi caption.
 - **Step 5b (the raw-footage Drive-link announcement) is now a standard part
   of every week's posting, not an occasional extra** (settled 2026-09-08,
   was previously framed as optional). Ask Kaveh for the Drive share link if
-  you don't have it yet; don't skip the step for not having it.
+  you don't have it yet; don't skip the step for not having it. **2026-11-08:
+  raw video is no longer copied to Drive, so confirm with Kaveh what this
+  message should say before sending one -- see Step 5b's flag; don't invent new
+  Farsi text.**
 - **A game's watch-tagging quirks are worth a dedicated post-export pass, not
   fixed reactively mid-review.** Sep-06 was the first real game with Tallies
   data, and surfaced things worth analyzing properly once the picks are
@@ -305,7 +325,8 @@ marks) -> posted to a Telegram group with the Farsi caption.
   strike is earlier than the mark.
 - **Picks come as structured lines** (`r07 slomo=6.5-9 crop=left`, format in
   processing.md Step 3). **Print that format to Kaveh when the candidates
-  are ready for review**, every game, without being asked. `trim=N` (2026-10-19)
+  are ready for review** (after the Step 6 timelapse is rendered or at least
+  launched), every game, without being asked. `trim=N` (2026-10-19)
   exports only a window around second N of the review clip (10s before, 4s
   after, stretched to cover the score-flip tap, capped at N+15s with a loud
   warning); Kaveh gives just that one number. The scoreboard is rebased onto
