@@ -38,6 +38,8 @@ from soccer_highlights.timeline import GlobalPeak, Interval, merge_intervals
 RECORDING_TZ = ZoneInfo("America/Los_Angeles")
 
 CATEGORIES = frozenset({"white_goal", "black_goal", "moment"})
+# What a slow-mo dot can be anchored on (sheet column `slomo_center_source`).
+SLOMO_SOURCES = ("peak", "goal_tap", "moment_tap")
 _UNDO = "undo"
 
 
@@ -676,6 +678,31 @@ def review_sort_key(
     return (tier, -gemini_score, start_seconds)
 
 
+def _slomo_anchor(
+    interval: Interval,
+    source: str,
+    owner: ResolvedMark | None,
+    tap_lead_seconds: float,
+) -> tuple[float, str] | None:
+    """(global_center_seconds, source_kind) of the slow-mo centre, or None.
+
+    source_kind is one of SLOMO_SOURCES: "peak" when the centre sits on an audio
+    peak (a `both` mark's snapped peak, or an `audio` candidate's strongest), else
+    the tap fallback tagged by what was tapped -- "goal_tap" or "moment_tap"."""
+    peak_time: float | None = None
+    if source == "both" and owner is not None and owner.interval is not None and owner.interval.peaks:
+        peak_time = owner.interval.peaks[0].time_seconds
+    elif interval.peaks:
+        peak_time = max(interval.peaks, key=lambda p: p.score).time_seconds
+
+    if peak_time is not None:
+        return peak_time, "peak"
+    if owner is not None and owner.global_seconds is not None:
+        kind = "goal_tap" if owner.mark.category in _GOAL_CATEGORIES else "moment_tap"
+        return owner.global_seconds - tap_lead_seconds, kind
+    return None
+
+
 def slomo_center_seconds(
     interval: Interval,
     source: str,
@@ -696,22 +723,27 @@ def slomo_center_seconds(
     (fixed-window fallback, audio found nothing) has no peak, so fall back to the
     tap minus `tap_lead_seconds`: taps trail the event by the press delay.
     None when neither a peak nor a located tap exists."""
-    peak_time: float | None = None
-    if source == "both" and owner is not None and owner.interval is not None and owner.interval.peaks:
-        peak_time = owner.interval.peaks[0].time_seconds
-    elif interval.peaks:
-        peak_time = max(interval.peaks, key=lambda p: p.score).time_seconds
-
-    if peak_time is not None:
-        global_center = peak_time
-    elif owner is not None and owner.global_seconds is not None:
-        global_center = owner.global_seconds - tap_lead_seconds
-    else:
+    anchor = _slomo_anchor(interval, source, owner, tap_lead_seconds)
+    if anchor is None:
         return None
-
+    global_center, _ = anchor
     duration = interval.end_seconds - interval.start_seconds
     relative = min(max(global_center - interval.start_seconds, 0.0), duration)
     return round(relative, 1)
+
+
+def slomo_center_source(
+    interval: Interval,
+    source: str,
+    owner: ResolvedMark | None,
+    tap_lead_seconds: float = 3.0,
+) -> str:
+    """What the slow-mo dot is anchored on (2026-11-08), one of SLOMO_SOURCES, or
+    "" when there is no dot (`slomo_center_seconds` is None). Picks the review
+    dot's colour: "peak" = yellow, "goal_tap" = blue, "moment_tap" = red. A `both`
+    clip is "peak" -- the dot sits on the audio peak its tap corroborated."""
+    anchor = _slomo_anchor(interval, source, owner, tap_lead_seconds)
+    return "" if anchor is None else anchor[1]
 
 
 @dataclass

@@ -6,8 +6,9 @@ would contaminate the score and the action_region read), so pre-label renders
 CLEAN clips into a local work dir, Gemini scores those, and only then does this
 module re-encode each clip with (a) the outline of the crop window its
 `action_region` will be exported with and (b) one small solid dot, top-right,
-for ~20 frames centred on `slomo_center_s` (the slow-mo replay's centre). Exports
-never get either.
+for ~20 frames centred on `slomo_center_s` (the slow-mo replay's centre), coloured
+by what it is anchored on (`slomo_center_source`: yellow audio peak, blue goal tap,
+red moment tap). Exports never get either.
 
 Resume safety lives here too, because this laptop gets interrupted: an
 `OverlayLedger` (JSON in the work dir) records which clean clips and which
@@ -112,18 +113,21 @@ def overlay_review_clip(
     overlay_cfg: ReviewOverlayConfig,
     review_cfg: ReviewConfig,
     tmp_dir: Path,
+    dot_source: str | None = None,
 ) -> None:
     """Re-encode `clean_path` to `out_path` with the box (if `region`) and the dot
-    (if `slomo_center_s`). Same settings as the review render (crf/preset/threads
+    (if `slomo_center_s`), coloured by `dot_source` (`slomo_center_source`; blank
+    or None = the audio-peak yellow). Same settings as the review render (crf/preset/threads
     from `review_cfg`), audio stream-copied. A clip with neither is just copied.
     `out_path` is written directly -- callers publish it atomically themselves."""
     width, height, duration = probe_video(clean_path)
     diameter = max(6, round(overlay_cfg.dot_diameter_fraction * width))
-    dot_path = tmp_dir / f"dot_{diameter}_{overlay_cfg.dot_color}.png"
+    dot_color = overlay_cfg.dot_color_for(dot_source)
+    dot_path = tmp_dir / f"dot_{diameter}_{dot_color}.png"
     use_dot = slomo_center_s is not None
     if use_dot and not dot_path.exists():
         tmp_dir.mkdir(parents=True, exist_ok=True)
-        write_dot_png(dot_path, diameter, overlay_cfg.dot_color)
+        write_dot_png(dot_path, diameter, dot_color)
 
     graph = build_overlay_graph(width, height, region, slomo_center_s, review_cfg.fps, crop_cfg, overlay_cfg)
     if graph is None:
@@ -160,10 +164,14 @@ def overlay_signature(
     slomo_center_s: float | None,
     cfg: ReviewOverlayConfig,
     crop_cfg: CropConfig,
+    dot_source: str | None = None,
 ) -> str:
     """Identity of an overlaid clip: everything that changes its pixels. A region
     arriving late (a failed describe retried on rerun) or a config tweak changes
-    this, so the clip is re-overlaid from the clean one; otherwise it is skipped."""
+    this, so the clip is re-overlaid from the clean one; otherwise it is skipped.
+    The resolved dot colour (from `dot_source`) is part of the identity. NOTE: the
+    2026-11-08 colour fields changed `repr(cfg)` and added this term, so a rerun
+    of pre-label on a game overlaid before that date re-overlays its clips."""
     return "|".join(
         [
             clean_signature(start_seconds, end_seconds),
@@ -171,6 +179,7 @@ def overlay_signature(
             "-" if slomo_center_s is None else f"{slomo_center_s:.1f}",
             repr(cfg),
             repr(crop_cfg),
+            cfg.dot_color_for(dot_source),
         ]
     )
 

@@ -20,6 +20,7 @@ from soccer_highlights.marks import (
     marks_outside_their_clip,
     near_cam_flag,
     slomo_center_seconds,
+    slomo_center_source,
     sync_clap_flags,
     review_sort_key,
     review_tier,
@@ -780,3 +781,30 @@ def test_slomo_center_is_relative_to_start_even_after_the_clip_was_extended_for_
     extend_for_score_flip([(iv, "both", owner)], MarksConfig(score_flip_cap_seconds=30.0, score_flip_tail_seconds=3.0))
     assert iv.end_seconds == 161.0 and iv.start_seconds == 141.0
     assert slomo_center_seconds(iv, "both", owner) == before == 9.0
+
+
+# --- slomo_center_source: what the review dot is anchored on (2026-11-08) ---
+
+
+def test_slomo_source_is_peak_for_audio_candidates_and_for_both_marks():
+    iv = Interval(start_seconds=100.0, end_seconds=120.0, peaks=[GlobalPeak(112.0, score=0.9)])
+    assert slomo_center_source(iv, "audio", None) == "peak"
+    # a goal tap that corroborated an audio peak: the dot sits on the peak -> "audio" yellow
+    assert slomo_center_source(iv, "both", _owner("white_goal", 114.0, peak_time=112.0)) == "peak"
+    assert slomo_center_source(iv, "both", _owner("moment", 114.0, peak_time=112.0)) == "peak"
+
+
+def test_slomo_source_is_goal_tap_or_moment_tap_when_the_tap_fallback_is_used():
+    iv = Interval(start_seconds=200.0, end_seconds=220.0)  # no peaks
+    assert slomo_center_source(iv, "mark", _owner("white_goal", 212.0)) == "goal_tap"
+    assert slomo_center_source(iv, "mark", _owner("black_goal", 212.0)) == "goal_tap"
+    assert slomo_center_source(iv, "mark", _owner("moment", 212.0)) == "moment_tap"
+
+
+def test_slomo_source_is_blank_without_any_anchor_and_agrees_with_slomo_center_seconds():
+    iv = Interval(start_seconds=200.0, end_seconds=220.0)
+    assert slomo_center_source(iv, "mark", None) == ""
+    assert slomo_center_source(iv, "mark", _owner("white_goal", None)) == ""
+    assert slomo_center_seconds(iv, "mark", None) is None
+    # clamped fallback is still a tap-anchored dot
+    assert slomo_center_source(iv, "mark", _owner("black_goal", 201.0)) == "goal_tap"

@@ -446,8 +446,10 @@ cd C:/dev/soccer-highlights
 **Order inside `pre-label`** (2026-10-18): clean review clips are rendered
 into a LOCAL work dir -> Gemini scores those clean clips -> the sheet is
 written -> an overlay pass re-encodes each 1280px clip with the **crop box**
-(cyan outline of its `action_region`) and the **slow-mo center dot** (yellow,
-top-right, ~20 frames) and publishes it flat into `Review\`. Gemini never sees
+(cyan outline of its `action_region`) and the **slow-mo center dot**
+(top-right, ~36 frames, colored by what it is anchored on: yellow = audio
+peak, blue = goal tap, red = `moment` tap; 2026-11-08) and publishes it flat
+into `Review\`. Gemini never sees
 an overlay. The overlay pass costs ~8-9s per 10s clip (~12-15 min for ~55
 clips). Every step is resumable via `pre_label_ledger.json` in the work dir
 (signature match + `is_playable()`); a failed overlay publishes the clean clip
@@ -469,7 +471,9 @@ and loses its review boost.
 the same Gemini call -- the field is ordered last in the schema so it can't
 steer the score; blank = unknown = full frame at export) and `slomo_center_s`
 (seconds from the clip's start: the audio peak, or tap - 3s when the clip has
-no peak; this is where the dot shows).
+no peak; this is where the dot shows) and `slomo_center_source`
+(`peak|goal_tap|moment_tap`, 2026-11-08: what the dot is anchored on, which
+picks its color; blank = no dot; a sheet without the column renders yellow).
 
 **`--near-cam-team-first-half`** (added 2026-09-07): which team's SHOTS the
 camera captures in the FIRST half, i.e. the **attacking** team -- the
@@ -906,7 +910,8 @@ r09 slomo=4-7@0.5 crop=full   # custom speed; full = no crop
   Center-cam games still use Gemini's left/center/right. The boxes are tied to
   one camera mount: re-draw and re-confirm on a frame if the framing changes.
   Export width stays 2560, so the far box (~1440px of 4K) is upscaled ~1.8x.
-- The yellow dot in each review clip marks the default slow-mo center; the
+- The dot in each review clip marks the default slow-mo center (yellow = audio
+  peak, blue = goal tap, red = `moment` tap -- see `slomo_center_source`); the
   cyan box is the crop export will use unless `crop=` overrides it.
 - `trim=N` (2026-10-19), N = the second on the review clip's own timeline where
   the goal/moment happens: exports [N-10, N+4] instead of the whole 40-110s

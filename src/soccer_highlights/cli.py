@@ -980,6 +980,9 @@ def cmd_pre_label(
     slomo_centers = [
         marks.slomo_center_seconds(interval, source, owner) for interval, source, owner in zip(merged, sources, owners)
     ]
+    slomo_sources = [
+        marks.slomo_center_source(interval, source, owner) for interval, source, owner in zip(merged, sources, owners)
+    ]
     rows = [
         label_audit.LabeledRow(
             strategy="candidates",
@@ -1015,16 +1018,16 @@ def cmd_pre_label(
         + ["source", "mark_category", "is_sync_clap", "is_near_cam_goal"]
         + score_headers
         + ["gemini_score", "goal_this_end", "gemini_caption", "gemini_description"]
-        + ["action_region", "slomo_center_s"]
+        + ["action_region", "slomo_center_s", "slomo_center_source"]
         if sheet_rows
         else []
     )
     # sheet_rows, descriptions, sources, mark_categories, is_sync_claps,
     # is_near_cam_goals and score_columns are all in `merged` order.
     blank_scores = [None] * len(sheet_rows)
-    for sheet_row, description, source, mark_category, is_sync_clap, is_near_cam, score, slomo in zip(
+    for sheet_row, description, source, mark_category, is_sync_clap, is_near_cam, score, slomo, slomo_source in zip(
         sheet_rows, descriptions, sources, mark_categories, is_sync_claps, is_near_cam_goals,
-        score_columns or blank_scores, slomo_centers,
+        score_columns or blank_scores, slomo_centers, slomo_sources,
     ):
         sheet_row["source"] = source
         sheet_row["mark_category"] = mark_category
@@ -1047,6 +1050,8 @@ def cmd_pre_label(
             camera_mode, is_near_cam, description.action_region if description else None, cfg.crop
         ) or ""
         sheet_row["slomo_center_s"] = "" if slomo is None else f"{slomo:.1f}"
+        # What the dot sits on (peak|goal_tap|moment_tap) -> its colour. Blank = no dot.
+        sheet_row["slomo_center_source"] = slomo_source
     with open(sheet_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -1060,23 +1065,28 @@ def cmd_pre_label(
     failed: list[str] = []
     overlay_tmp = work / "overlay_tmp"
     overlay_tmp.mkdir(parents=True, exist_ok=True)
-    for i, (interval, description, slomo, is_near_cam) in enumerate(
-        zip(merged, descriptions, slomo_centers, is_near_cam_goals), start=1
+    for i, (interval, description, slomo, slomo_source, is_near_cam) in enumerate(
+        zip(merged, descriptions, slomo_centers, slomo_sources, is_near_cam_goals), start=1
     ):
         clip_file = f"clip_{i:03d}.mp4"
         region = candidate_region(camera_mode, is_near_cam, description.action_region if description else None, cfg.crop)
         signature = review_overlay.overlay_signature(
-            interval.start_seconds, interval.end_seconds, region, slomo, cfg.review_overlay, cfg.crop
+            interval.start_seconds, interval.end_seconds, region, slomo, cfg.review_overlay, cfg.crop,
+            slomo_source,
         )
         final_path = strategy_dir / clip_file
         if review_overlay.step_is_done(ledger, "overlaid", clip_file, signature, final_path):
             n_skipped += 1
             continue
-        print(f"Overlay {i}/{len(merged)}: {clip_file} region={region or '-'} slomo={slomo if slomo is not None else '-'}")
+        print(
+            f"Overlay {i}/{len(merged)}: {clip_file} region={region or '-'} "
+            f"slomo={slomo if slomo is not None else '-'} ({slomo_source or '-'})"
+        )
         overlaid_path = overlay_tmp / clip_file
         try:
             review_overlay.overlay_review_clip(
-                clean_dir / clip_file, overlaid_path, region, slomo, cfg.crop, cfg.review_overlay, cfg.review, overlay_tmp
+                clean_dir / clip_file, overlaid_path, region, slomo, cfg.crop, cfg.review_overlay, cfg.review, overlay_tmp,
+                slomo_source,
             )
             review_overlay.publish_file(overlaid_path, final_path)
             ledger.record("overlaid", clip_file, signature)

@@ -447,16 +447,28 @@ class ReviewOverlayConfig:
     Review clips only -- exports never get either."""
 
     # Dot: ~6% of frame width (was 1.5%, invisible on Oct-18; 4% before 2026-10-26), top-right corner, shown for dot_frames frames
-    # centred on slomo_center_s. Yellow with a dark rim reads on grass, court and
-    # both shirt colours.
+    # centred on slomo_center_s. Colour = what the dot is anchored on (2026-11-08):
+    # yellow = an audio peak, blue = a goal tap (no peak, tap - 3s), red = a
+    # `moment` tap (same fallback). Dark rim reads on grass, court and both shirts.
     dot_diameter_fraction: float = 0.06
     dot_margin_fraction: float = 0.012
     dot_frames: int = 36
-    dot_color: str = "FFD600"
+    dot_color_peak: str = "FFD600"
+    dot_color_goal_tap: str = "2979FF"
+    dot_color_moment_tap: str = "FF1744"
     # Box outline: thickness in pixels at 1280px wide (scaled for other widths).
     box_thickness_px: float = 3.0
     box_color: str = "00E5FF"
     box_alpha: float = 0.85
+
+    def dot_color_for(self, slomo_center_source: str | None) -> str:
+        """Hex colour for a dot by its `slomo_center_source` sheet value; blank or
+        unknown (e.g. an older sheet without the column) is the audio yellow."""
+        if slomo_center_source == "goal_tap":
+            return self.dot_color_goal_tap
+        if slomo_center_source == "moment_tap":
+            return self.dot_color_moment_tap
+        return self.dot_color_peak
 
 
 @dataclass

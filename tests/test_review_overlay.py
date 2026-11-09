@@ -1,7 +1,7 @@
 import pytest
 
 from soccer_highlights import review_overlay
-from soccer_highlights.config import CropConfig, ReviewOverlayConfig
+from soccer_highlights.config import CropConfig, ReviewConfig, ReviewOverlayConfig
 from soccer_highlights.review_overlay import (
     OverlayLedger,
     build_overlay_graph,
@@ -111,3 +111,54 @@ def test_publish_file_replaces_atomically_and_leaves_no_part_file(tmp_path):
     publish_file(src, dst)
     assert dst.read_bytes() == b"new"
     assert sorted(p.name for p in dst.parent.iterdir()) == ["clip_001.mp4"]  # Review stays flat and clean
+
+
+def test_dot_color_is_chosen_by_source_and_defaults_to_audio_yellow():
+    assert OVL.dot_color_for("peak") == "FFD600"
+    assert OVL.dot_color_for("goal_tap") == OVL.dot_color_goal_tap == "2979FF"
+    assert OVL.dot_color_for("moment_tap") == OVL.dot_color_moment_tap == "FF1744"
+    # older sheets have no slomo_center_source column -> blank/None/unknown = yellow
+    for legacy in ("", None, "garbage"):
+        assert OVL.dot_color_for(legacy) == OVL.dot_color_peak
+
+
+def test_dot_colors_are_configurable():
+    cfg = ReviewOverlayConfig(dot_color_goal_tap="0000FF")
+    assert cfg.dot_color_for("goal_tap") == "0000FF"
+
+
+def test_overlay_signature_changes_with_the_dot_source_but_blank_equals_peak():
+    base = overlay_signature(10.0, 25.0, "left", 5.0, OVL, CROP)
+    assert base == overlay_signature(10.0, 25.0, "left", 5.0, OVL, CROP, "")
+    assert base == overlay_signature(10.0, 25.0, "left", 5.0, OVL, CROP, "peak")
+    assert base != overlay_signature(10.0, 25.0, "left", 5.0, OVL, CROP, "goal_tap")
+    assert overlay_signature(10.0, 25.0, "left", 5.0, OVL, CROP, "goal_tap") != overlay_signature(
+        10.0, 25.0, "left", 5.0, OVL, CROP, "moment_tap"
+    )
+
+
+def test_dot_png_uses_the_source_color_with_a_dark_rim(tmp_path):
+    from PIL import Image
+
+    for source, rgb in (("goal_tap", (0x29, 0x79, 0xFF)), ("moment_tap", (0xFF, 0x17, 0x44))):
+        path = tmp_path / f"{source}.png"
+        write_dot_png(path, 31, OVL.dot_color_for(source))
+        im = Image.open(path).convert("RGBA")
+        assert im.getpixel((15, 15)) == (*rgb, 255)
+        assert im.getpixel((15, 0))[:3] == (20, 20, 20)  # rim stays dark so it reads on grass
+
+
+def test_overlay_review_clip_draws_the_dot_png_for_the_source_color(tmp_path, monkeypatch):
+    clean = tmp_path / "clean.mp4"
+    clean.write_bytes(b"x")
+    monkeypatch.setattr(review_overlay, "probe_video", lambda path: (1280, 720, 10.0))
+    seen: list[list[str]] = []
+    monkeypatch.setattr(review_overlay, "_run_ffmpeg", lambda args, timeout: seen.append(args))
+    review_cfg = ReviewConfig()
+    for source in ("goal_tap", "moment_tap", None):
+        review_overlay.overlay_review_clip(
+            clean, tmp_path / "out.mp4", None, 5.0, CROP, OVL, review_cfg, tmp_path, source
+        )
+    pngs = sorted(p.name for p in tmp_path.glob("dot_*.png"))
+    assert pngs == ["dot_77_2979FF.png", "dot_77_FF1744.png", "dot_77_FFD600.png"]
+    assert len(seen) == 3

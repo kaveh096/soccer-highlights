@@ -123,7 +123,10 @@ review_overlay:
   dot_diameter_fraction: 0.06   # was 0.015, then 0.04 -- Kaveh asked for a larger dot on 2026-10-26
   dot_margin_fraction: 0.012
   dot_frames: 36   # was 20 (~0.7s), too fast to notice; ~1.2s
-  dot_color: "FFD600"
+  # Dot colour = what it is anchored on (2026-11-08): yellow audio peak, blue goal tap, red moment tap
+  dot_color_peak: "FFD600"
+  dot_color_goal_tap: "2979FF"
+  dot_color_moment_tap: "FF1744"
   box_thickness_px: 3.0
   box_color: "00E5FF"
   box_alpha: 0.85
