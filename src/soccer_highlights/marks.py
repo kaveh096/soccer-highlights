@@ -111,30 +111,32 @@ def load_tallies_csv(path: str | Path, category: str) -> tuple[list[Mark], int]:
     adjusted, so it is warned about: after one, the counter total can no
     longer be trusted as a checksum against the number of press rows.
 
-    A negative `count_change` is Tallies' minus button. **Not auto-resolved
-    as an undo** (changed 2026-09-07, was pop-the-most-recently-active-press
-    before): Sep-06's real data showed a decrement landing 2.5 minutes after
-    the press it was meant to cancel, with nothing else in between for that
-    stack-based pop to trip over by luck -- but there is no guarantee of
-    that in general, and a late decrement silently cancelling the WRONG
-    earlier press (if something else in the same category happened in
-    between) would be worse than not resolving it at all. Kaveh's call:
-    keep every positive press as a real Mark unconditionally, and identify
-    the actual mis-taps by hand during candidate review, against real
-    footage, rather than have this module guess. Decrement rows are
-    counted and warned about, not silently dropped without a trace --
-    the count is also returned (not just printed), so a caller can turn it
-    into a durable, hard-to-miss gate instead of a console line that's easy
-    to read past (2026-09-08, after Sep-06's decrements were flagged in the
-    log but the follow-up correction never actually got applied before
-    posting -- see cmd_pre_label's DECREMENTS_PENDING.txt)."""
+    A negative `count_change` is Tallies' minus button and, per Kaveh's
+    standing rule (2026-11-08), CANCELS THE MOST RECENT STILL-ACTIVE POSITIVE
+    PRESS before it in this same counter's file -- the increment right before
+    it. Rows are processed in time order; each decrement unit pops the latest
+    unpaired press (LIFO), so a +1, -1, +1, +1 sequence keeps only the 3rd and
+    4th presses. History: originally a decrement popped the latest press; on 2026-09-07 that
+    was switched to "keep everything, warn, resolve by hand" because Sep-06's
+    decrement landed 2.5 minutes after the press it undid and a late decrement
+    could silently cancel the WRONG press; Kaveh reversed that on 2026-11-08 (the
+    minus button always undoes the press right before it). It is correct by
+    construction only when that holds, so every cancellation is printed as a
+    WARNING with both local times (America/Los_Angeles) for a quick glance.
+
+    A decrement with no earlier unpaired press to cancel (counter driven below
+    zero, or the only press already cancelled) stays UNRESOLVED: it is counted
+    and warned about, and the count is the function's second return value, which
+    callers turn into the durable DECREMENTS_PENDING.txt gate (2026-09-08).
+    Rows with `count_change == 0` (AUTO_RESET_DAILY, RESET_FIRST_AND_SECOND_COUNT)
+    are ignored, as are TALLY_CREATED; `EDIT_TALLY` is a manual edit of the
+    counter total, so it is only warned about."""
     path = Path(path)
     if category not in CATEGORIES:
         raise ValueError(f"Unknown category {category!r} (expected one of {sorted(CATEGORIES)})")
 
-    active: list[Mark] = []
+    presses: list[tuple[datetime, int]] = []  # (time, count_change) of CLICK rows
     saw_edit = False
-    n_decrements = 0
     with open(path, encoding="utf-8-sig", newline="") as f:
         for row in csv.DictReader(f):
             action = row["action"].strip()
@@ -150,27 +152,45 @@ def load_tallies_csv(path: str | Path, category: str) -> tuple[list[Mark], int]:
             # plain. Strip commas before int() either way.
             change = int(row["count_change"].replace(",", ""))
             timestamp = datetime.fromtimestamp(int(row["timestamp"].replace(",", "")) / 1000, tz=UTC)
-            if change > 0:
-                # |change| > 1 at a single instant can't be split into
-                # separate press times, so it collapses to one mark.
-                if change > 1:
-                    print(f"WARNING: {path.name}: count_change={change} at {timestamp} -- recording a single mark")
-                active.append(Mark(sequence=0, timestamp=timestamp, category=category))
-            elif change < 0:
-                n_decrements += 1
+            presses.append((timestamp, change))
+    presses.sort(key=lambda pc: pc[0])  # stable: same-millisecond rows keep file order
 
-    if n_decrements:
-        print(
-            f"WARNING: {path.name}: {n_decrements} decrement(s) (Tallies' minus button) were NOT auto-resolved -- "
-            "every positive press is still kept as a Mark. Identify and remove any real mis-taps by hand during "
-            "candidate review."
-        )
+    active: list[Mark] = []
+    n_unresolved = 0
+    for timestamp, change in presses:
+        if change > 0:
+            # |change| > 1 at a single instant can't be split into
+            # separate press times, so it collapses to one mark.
+            if change > 1:
+                print(f"WARNING: {path.name}: count_change={change} at {timestamp} -- recording a single mark")
+            active.append(Mark(sequence=0, timestamp=timestamp, category=category))
+        elif change < 0:
+            for _ in range(-change):
+                if active:
+                    gone = active.pop()
+                    print(
+                        f"WARNING: {path.name}: decrement at {_local_hms(timestamp)} CANCELLED the {category} press "
+                        f"at {_local_hms(gone.timestamp)} (local) -- glance at it: the minus button is assumed "
+                        "to undo the press right before it"
+                    )
+                else:
+                    n_unresolved += 1
+                    print(
+                        f"WARNING: {path.name}: decrement at {_local_hms(timestamp)} has NO earlier {category} "
+                        "press to cancel -- left UNRESOLVED (ask Kaveh)"
+                    )
+
     if saw_edit:
         print(
             f"WARNING: {path.name} contains an EDIT_TALLY row -- the counter total was manually edited, so it "
             "cannot be cross-checked against the number of press rows (the presses themselves are still fine)."
         )
-    return active, n_decrements
+    return active, n_unresolved
+
+
+def _local_hms(moment: datetime) -> str:
+    """hh:mm:ss in the recording timezone (America/Los_Angeles)."""
+    return moment.astimezone(RECORDING_TZ).strftime("%H:%M:%S")
 
 
 def merge_tally_marks(per_category: list[Mark]) -> list[Mark]:

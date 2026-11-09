@@ -118,16 +118,15 @@ def test_load_tallies_csv_parses_the_real_bench_test_export(tmp_path):
 
     marks, n_decrements = load_tallies_csv(csv_path, "white_goal")
 
-    # Decrements are NOT auto-resolved (2026-09-07) -- every positive press
-    # survives as a Mark regardless of any -1 rows around it.
-    assert n_decrements == 3
-    assert [m.category for m in marks] == ["white_goal"] * 5
+    # 2026-11-08: each decrement cancels the press right before it. +495354 is
+    # cancelled by -510932; -512546 has nothing left to cancel (unresolved);
+    # +755313 is cancelled by -756222.
+    assert n_decrements == 1
+    assert [m.category for m in marks] == ["white_goal"] * 3
     assert [m.timestamp.timestamp() for m in marks] == [
-        1788407495354 / 1000,
         1788407522303 / 1000,
         1788407522616 / 1000,
         1788407632369 / 1000,
-        1788407755313 / 1000,
     ]
 
 
@@ -146,20 +145,91 @@ def test_load_tallies_csv_ignores_non_click_rows(tmp_path):
     assert n_decrements == 0
 
 
-def test_load_tallies_csv_decrements_are_not_auto_resolved(tmp_path, capsys):
-    # 2026-09-07 (Kaveh, after Sep-06's real data): a decrement is no longer
-    # popped against the most-recently-active press -- it's counted and
-    # warned about, but every positive press survives regardless.
-    white = tmp_path / "white.csv"
-    white.write_text(
-        "timestamp,count,count_change,action\n1788407400000,1,1,CLICK\n1788407600000,0,-1,CLICK\n", encoding="utf-8"
+def _tally(tmp_path, name: str, rows: list[tuple[int, int, str]]) -> Path:
+    """Write a Tallies CSV from (epoch_ms, count_change, action) rows."""
+    path = tmp_path / name
+    lines = ["timestamp,count,count_change,action"] + [f"{ts},0,{change},{action}" for ts, change, action in rows]
+    path.write_text(chr(10).join(lines) + chr(10), encoding="utf-8")
+    return path
+
+
+def test_decrement_cancels_the_press_right_before_it_black_goal_2026_11_08(tmp_path, capsys):
+    # Real Black goal counter, 2026-11-08: first press cancelled, 3rd and 4th are the two black goals.
+    csv_path = _tally(
+        tmp_path,
+        "black.csv",
+        [
+            (1794160401261, 1, "CLICK"),
+            (1794160740837, -1, "CLICK"),
+            (1794160828938, 1, "CLICK"),
+            (1794162039075, 1, "CLICK"),
+        ],
     )
 
-    marks, n_decrements = load_tallies_csv(white, "white_goal")
+    marks, n_unresolved = load_tallies_csv(csv_path, "black_goal")
 
-    assert [m.category for m in marks] == ["white_goal"]  # the +1 survives despite the later -1
-    assert n_decrements == 1
-    assert "1 decrement(s)" in capsys.readouterr().out
+    assert n_unresolved == 0
+    assert [int(m.timestamp.timestamp() * 1000) for m in marks] == [1794160828938, 1794162039075]
+    out = capsys.readouterr().out
+    # one loud line naming the cancelled press and the decrement, in America/Los_Angeles
+    assert out.count("CANCELLED") == 1
+    cancelled_local = datetime.fromtimestamp(1794160401261 / 1000, tz=RECORDING_TZ).strftime("%H:%M:%S")
+    decrement_local = datetime.fromtimestamp(1794160740837 / 1000, tz=RECORDING_TZ).strftime("%H:%M:%S")
+    assert "WARNING" in out and cancelled_local in out and decrement_local in out
+
+
+def test_decrement_with_no_earlier_press_stays_unresolved(tmp_path, capsys):
+    csv_path = _tally(tmp_path, "w.csv", [(1788407400000, -1, "CLICK"), (1788407500000, 1, "CLICK")])
+
+    marks, n_unresolved = load_tallies_csv(csv_path, "white_goal")
+
+    assert n_unresolved == 1
+    assert [int(m.timestamp.timestamp() * 1000) for m in marks] == [1788407500000]  # later press untouched
+    assert "UNRESOLVED" in capsys.readouterr().out
+
+
+def test_decrements_cancel_most_recent_unpaired_presses_lifo(tmp_path):
+    # +A +B -  +C -  -  -  => B cancelled, C cancelled, A cancelled, last decrement unresolved
+    csv_path = _tally(
+        tmp_path,
+        "w.csv",
+        [
+            (1000, 1, "CLICK"),
+            (2000, 1, "CLICK"),
+            (3000, -1, "CLICK"),
+            (4000, 1, "CLICK"),
+            (5000, -1, "CLICK"),
+            (6000, -1, "CLICK"),
+            (7000, -1, "CLICK"),
+        ],
+    )
+    marks, n_unresolved = load_tallies_csv(csv_path, "white_goal")
+    assert marks == [] and n_unresolved == 1
+
+
+def test_a_decrement_only_cancels_presses_earlier_in_time_even_if_rows_are_out_of_order(tmp_path):
+    csv_path = _tally(tmp_path, "w.csv", [(5000, -1, "CLICK"), (1000, 1, "CLICK"), (9000, 1, "CLICK")])
+    marks, n_unresolved = load_tallies_csv(csv_path, "white_goal")
+    assert n_unresolved == 0
+    assert [int(m.timestamp.timestamp() * 1000) for m in marks] == [9000]
+
+
+def test_zero_change_rows_are_ignored_and_never_pair_with_decrements(tmp_path):
+    csv_path = _tally(
+        tmp_path,
+        "w.csv",
+        [
+            (1000, 0, "TALLY_CREATED"),
+            (2000, 1, "CLICK"),
+            (3000, 0, "AUTO_RESET_DAILY"),
+            (3500, 0, "CLICK"),
+            (4000, 0, "RESET_FIRST_AND_SECOND_COUNT"),
+            (5000, 1, "CLICK"),
+        ],
+    )
+    marks, n_unresolved = load_tallies_csv(csv_path, "white_goal")
+    assert n_unresolved == 0
+    assert [int(m.timestamp.timestamp() * 1000) for m in marks] == [2000, 5000]
 
 
 def test_merge_tally_marks_orders_by_timestamp_across_files_and_numbers_sequences(tmp_path):

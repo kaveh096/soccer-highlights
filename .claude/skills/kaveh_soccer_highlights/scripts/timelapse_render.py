@@ -101,7 +101,7 @@ def _load_score_events(tally_csvs: list[str], chunks, clock_offset: float, cfg) 
         loaded, n_decrements = marks.load_tallies_csv(path.strip(), category.strip())
         per_category.extend(loaded)
         if n_decrements:
-            print(f"WARNING: {category} has {n_decrements} unresolved decrement(s) -- see processing.md's gate")
+            print(f"WARNING: {category} has {n_decrements} UNRESOLVABLE decrement(s) (nothing earlier to cancel) -- see processing.md's gate")
     active = marks.merge_tally_marks(per_category)
     resolved = marks.resolve_marks(active, chunks, [], cfg.marks, cfg.timeline, clock_offset)
     return marks.score_events(resolved)

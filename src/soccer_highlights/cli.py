@@ -928,20 +928,22 @@ def cmd_pre_label(
     decrements_marker = strategy_dir / "DECREMENTS_PENDING.txt"
     if pending_decrements:
         lines = [
-            "Unresolved Tallies decrement(s) -- every positive press was kept as a real Mark, so the",
-            "derived score is an UPPER BOUND, not the true final tally, until these are resolved.",
+            "Unresolvable Tallies decrement(s) -- a decrement with NO earlier press in its counter to",
+            "cancel. (Decrements that do have one cancel it automatically since 2026-11-08; see the",
+            "decrement ... CANCELLED WARNING lines in the pre-label log.) The derived score may be off",
+            "by these until they are resolved.",
             "",
-            "STOP before Step 3/4 (picking/exporting): ask Kaveh which specific press(es) each decrement",
-            "was meant to cancel, then either remove that press from the source tally CSV (Raw\\) and",
-            "re-run pre-label, or hand-correct score_white/score_black in review_sheet.csv for every",
-            "affected row. Delete this file once resolved -- it is not auto-cleared on its own.",
+            "STOP before Step 3/4 (picking/exporting): ask Kaveh what each decrement was meant to undo,",
+            "then either fix the source tally CSV (Raw\\) and re-run pre-label, or hand-correct",
+            "score_white/score_black in review_sheet.csv for every affected row. This file clears itself",
+            "on a rerun with nothing pending.",
             "",
         ] + [f"  {category}: {count} decrement(s)" for category, count in pending_decrements]
         decrements_marker.write_text("\n".join(lines) + "\n", encoding="utf-8")
         print(
             f"\n*** {decrements_marker} written -- "
-            f"{sum(c for _, c in pending_decrements)} unresolved decrement(s). STOP and ask Kaveh which "
-            "press(es) they cancel before Step 3/4. ***"
+            f"{sum(c for _, c in pending_decrements)} UNRESOLVABLE decrement(s) (no earlier press to cancel). "
+            "STOP and ask Kaveh what they undo before Step 3/4. ***"
         )
     elif decrements_marker.exists():
         decrements_marker.unlink()
@@ -1257,9 +1259,10 @@ def _load_marks(
     """Load marks from either the generic marks CSV or one-or-more Tallies
     per-counter exports, returning (active_marks, undone_count, source_label,
     pending_decrements) -- the last is a (category, count) list, empty
-    unless a Tallies counter had a decrement that wasn't auto-resolved (see
-    load_tallies_csv), for the caller to turn into a hard-to-miss gate
-    rather than something only visible in that one run's console output."""
+    unless a Tallies counter had a decrement with no earlier press to cancel
+    (see load_tallies_csv; decrements that do cancel a press are resolved there
+    and printed as WARNING lines), for the caller to turn into a hard-to-miss
+    gate rather than something only visible in that one run's console output."""
     if tally_csvs:
         per_category: list[marks.Mark] = []
         pending_decrements: list[tuple[str, int]] = []
@@ -1273,9 +1276,9 @@ def _load_marks(
             if n_decrements:
                 pending_decrements.append((category, n_decrements))
         active = marks.merge_tally_marks(per_category)
-        # Every positive press is kept unconditionally now (2026-09-07) --
-        # nothing is auto-resolved, so there's nothing for the global stack
-        # to undo either; pending_decrements carries what's still unresolved.
+        # Decrements were already applied per counter inside load_tallies_csv
+        # (2026-11-08), so there's nothing for the global undo stack to do;
+        # pending_decrements carries only the unresolvable ones.
         return active, 0, ", ".join(s.split("=", 1)[1] for s in tally_csvs), pending_decrements
 
     raw_marks = marks.load_marks_csv(marks_csv)
@@ -1365,9 +1368,9 @@ def cmd_ingest_marks(
         total = sum(c for _, c in pending_decrements)
         detail = ", ".join(f"{category}: {count}" for category, count in pending_decrements)
         print(
-            f"\n*** {total} unresolved decrement(s) ({detail}) -- every positive press is kept as a real Mark, "
-            "so this tally is an UPPER BOUND, not necessarily the true score. Ask Kaveh which press(es) each "
-            "decrement was meant to cancel before trusting it in Step 1/3/4. ***"
+            f"\n*** {total} UNRESOLVABLE decrement(s) ({detail}) -- no earlier press in that counter to cancel, "
+            "so this tally may be off. Ask Kaveh what each decrement was meant to undo before trusting it in "
+            "Step 1/3/4. ***"
         )
 
     if out:

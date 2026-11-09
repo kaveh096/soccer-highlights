@@ -211,30 +211,28 @@ marks) -> posted to a Telegram group with the Farsi caption.
   before 2026-10-11 keep the old layout; every command takes explicit paths, so
   they still work (`--review-dir` just points at the old `candidates\`).
   Metadata filenames were deliberately NOT renamed.
-- **A decrement (Tallies' minus button) is NOT auto-resolved as an undo**
-  (changed 2026-09-07 in `load_tallies_csv`, after Sep-06 showed a decrement
-  landing 2.5 minutes after the press it was meant to cancel, with no
-  guarantee nothing else in that category happened in between -- popping
-  the most-recently-active press is only correct by luck, not by
-  construction). Every positive press is now kept as a real Mark
-  unconditionally; decrements are counted and warned about, not resolved.
-  **This has a real consequence for the printed/derived score: it is now an
-  upper bound, not the true final tally, whenever any decrements exist for
-  that game.** Sep-06 bit this exact way -- Kaveh flagged 2 known mis-taps
-  for identification "during candidate review," but never actually named
-  which marks to exclude before export, so the posted clips showed black's
-  inflated raw count (12) instead of the agreed 10. Getting a decremented
-  game's displayed score right now requires an explicit follow-up: identify
-  the specific mis-tapped mark(s) and either drop them from the source CSV
-  or hand-correct `score_white`/`score_black`, before export -- don't let
-  "I'll figure out which ones later" silently ship as the displayed number.
-  **A console warning alone wasn't enough** (that's exactly what Sep-06 had,
-  and it still got missed) -- as of 2026-09-08, `pre-label` also writes
-  `Review\DECREMENTS_PENDING.txt` (self-clearing on a rerun with
-  nothing pending) whenever this applies, and `ingest-marks` prints the
-  same `***`-bracketed summary before any render. Treat that file's
-  existence as a hard stop: ask Kaveh which press(es) each decrement cancels
-  before Step 3/4, every time, don't just read past the console line.
+- **A decrement (Tallies' minus button) cancels the press right before it**
+  (Kaveh's explicit instruction, 2026-11-08, in `load_tallies_csv`; it
+  REVERSES the 2026-09-07 rule). Per category CSV, a decrement drops the most
+  recent still-active positive press (LIFO by time), so +1, -1, +1, +1 keeps
+  only the 3rd and 4th presses (real example, Black goal counter 2026-11-08:
+  epochs ...401261 +1, ...740837 -1, ...828938 +1, ...039075 +1 -> two black
+  goals). Rows with `count_change` 0 (AUTO_RESET_DAILY,
+  RESET_FIRST_AND_SECOND_COUNT) are ignored. **Caveat that motivated the old
+  rule (Sep-06): a decrement landed 2.5 minutes after the press it undid, so
+  the pop is correct by construction ONLY when the decrement undoes the press
+  right before it.** That is why it stays loud: every cancellation prints a
+  `WARNING` line with the cancelled press's local time (America/Los_Angeles,
+  hh:mm:ss) and the decrement's time, in `ingest-marks`, `pre-label` and the
+  timelapse script. Glance at them against the footage. A decrement with NO
+  earlier press to cancel (counter driven below zero) stays unresolved: it is
+  counted, and `pre-label` writes `Review\DECREMENTS_PENDING.txt`
+  (self-clearing on a rerun with nothing pending) and `ingest-marks` prints
+  the `***` summary. Treat that file's existence as a hard stop: ask Kaveh
+  what that decrement undoes before Step 3/4. (Sep-06 history: unresolved
+  mis-taps were never fixed before export and the posted clips showed black
+  at 12 instead of 10 -- hence the gate for what cannot be resolved
+  automatically.)
 - **Taps outside their own clip are now reported, not just discoverable in
   hindsight** (`marks.marks_outside_their_clip`, added 2026-09-08). A tap
   that lands outside its owning candidate's rendered window (even after

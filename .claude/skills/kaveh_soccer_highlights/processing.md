@@ -124,7 +124,7 @@ G:\My Drive\Photos and Movies\Sunday Soccer\<date>\
     post_sheet.csv                    derived pick sheet (Step 4b), only if needed
     events.json                       raw detected intervals
     descriptions_cache.json           resumable Gemini describe-call cache
-    DECREMENTS_PENDING.txt            only while a Tallies decrement is unresolved
+    DECREMENTS_PENDING.txt            only while a Tallies decrement has no press to cancel
     gsNN_<hhmmss>_g<sec>.mp4          goal_search.py review clips (Step 1d), if any
   Share\                            FLAT -- everything that gets posted
     <exported clips>.mp4              final share-quality exports (2560px, CRF
@@ -229,8 +229,9 @@ record a decrement differently on a second export: on 2026-10-04 the first
 `moment` export logged the minus press as `count_change` +1 with a lower
 `count`, the re-export as -1. If Kaveh wants that press kept as a moment, keep
 the ORIGINAL file in `Raw\` -- `load_tallies_csv` keys on the sign of
-`count_change`, so the re-export turns that press into an unresolved
-decrement (`DECREMENTS_PENDING.txt`) and it stops being a mark.
+`count_change`, so the re-export turns that press into a decrement that
+cancels the press before it (a printed `WARNING`; or, with nothing earlier to
+cancel, an unresolved one -> `DECREMENTS_PENDING.txt`) and it stops being a mark.
 
 ### Step 0c -- measure the clap-sync offset (`ingest-marks`)
 
@@ -631,26 +632,22 @@ the marks and fills in four `score_*` columns.** Two things to do with that:
   the peak), so a 14s goal clip becomes up to ~21s -- which puts it over the
   ~15s single-run export limit. Expect `seg_render.py` to be the normal path
   for goal clips now, not the exception.
-- **A decrement (Tallies' minus button) is no longer auto-resolved** (see
-  SKILL.md's settled-decisions list) -- every positive press is counted as a
-  real goal by default, so if any presses were corrected with a minus, the
-  printed/derived score is the UPPER bound, not the true final score, until
-  the specific mis-tapped press(es) are identified and removed or the
-  `score_white`/`score_black` columns hand-corrected. **This bit Sep-06**:
-  Kaveh flagged 2 known mis-taps for later identification, but the
-  correction was never actually applied to the sheet before export, so the
-  posted clips showed an inflated black score (12, not the agreed 10).
-  **Fixed 2026-09-08, don't rely on remembering this**: whenever any
-  category has unresolved decrements, `pre-label` now writes
-  `Review\DECREMENTS_PENDING.txt` and prints a `***`-bracketed warning
-  naming the count per category. **Treat this file's existence as a hard
-  stop**: before Step 3/4, ask Kaveh directly which specific press(es) each
-  decrement was meant to cancel, then either drop that press from the
-  source tally CSV and re-run `pre-label` (the marker clears itself on a
+- **A decrement (Tallies' minus button) cancels the press right before it**
+  (Kaveh, 2026-11-08; see SKILL.md's settled-decisions list). `load_tallies_csv`
+  resolves each decrement against the latest unpaired press of that category
+  and prints a `WARNING` per cancellation (cancelled press time, decrement
+  time, America/Los_Angeles) -- skim those lines at Step 0c/Step 1 and check
+  them against the footage, because the rule is only right when the minus
+  undoes the press right before it (Sep-06's did not). Only a decrement with
+  NO earlier press to cancel stays unresolved: then `pre-label` writes
+  `Review\DECREMENTS_PENDING.txt` and prints a `***`-bracketed warning naming
+  the count per category. **Treat that file's existence as a hard stop**:
+  before Step 3/4, ask Kaveh what that decrement was meant to undo, then fix
+  the source tally CSV and re-run `pre-label` (the marker clears itself on a
   clean rerun), or hand-correct `score_white`/`score_black` for every
-  affected row and delete the file. `ingest-marks` prints the same
-  `***`-bracketed summary at Step 0c, before any render -- don't wait until
-  Step 1 to notice.
+  affected row and delete the file. `ingest-marks` prints the same summary at
+  Step 0c, before any render. (Sep-06: unresolved mis-taps were never
+  corrected before export and the posted clips showed black at 12, not 10.)
 - **The score shown in a clip is "as of that clip's start," not the game's
   final tally** -- if the picked clips don't include one covering the very
   last goal of the game, no posted clip will ever show the true final
