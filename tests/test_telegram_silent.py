@@ -40,3 +40,16 @@ def test_send_message_silent_sets_disable_notification(env: TelegramConfig, monk
     telegram.send_message("hi", env, silent=True)
     assert "disable_notification" not in bodies[0]
     assert bodies[1]["disable_notification"] is True
+
+
+def test_response_timeout_is_not_retried(env: TelegramConfig, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[int] = []
+
+    def boom(request: object, timeout: float) -> object:
+        calls.append(1)
+        raise TimeoutError("The read operation timed out")
+
+    monkeypatch.setattr(telegram.urllib.request, "urlopen", boom)
+    with pytest.raises(telegram.TelegramError, match="MAY have been posted"):
+        telegram.send_message("hi", env)
+    assert len(calls) == 1  # never retried: a retry could double-post

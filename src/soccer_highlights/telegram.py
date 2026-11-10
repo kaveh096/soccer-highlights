@@ -66,6 +66,14 @@ def _send_with_retry(request: urllib.request.Request, cfg: TelegramConfig, metho
                 break
             if attempt < cfg.max_retries:
                 time.sleep(2**attempt)
+        except TimeoutError as exc:
+            # The request body was sent but no answer came back in time. Telegram may
+            # STILL have posted it (Nov-08 r02: message 226 was in the group), so a
+            # blind retry would double-post. Fail loudly instead of retrying/crashing.
+            raise TelegramError(
+                f"{method}: no response within {cfg.request_timeout_seconds:.0f}s -- the message MAY have been "
+                "posted. Check the group (or probe the next message_id) before rerunning."
+            ) from exc
         except (urllib.error.URLError, TelegramError) as exc:
             last_exc = exc
             if attempt < cfg.max_retries:
