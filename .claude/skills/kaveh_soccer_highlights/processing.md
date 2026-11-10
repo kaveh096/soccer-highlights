@@ -1206,6 +1206,10 @@ and should stay one: it never re-encodes, so there's nothing to overlay at this
 stage. If a posted clip is missing the timestamp, the fix is upstream (re-export
 it), not a post-processing pass.
 
+**Posting at night: add `--silent`** (2026-11-10; `telegram-post` and `telegram-message`): sends with
+`disable_notification`, so the group's phones don't buzz. The Nov-08 exports finished at 03:30 and
+the group is a dozen dads; check the clock before the real send.
+
 **Then the real send**, same command minus `--dry-run`. Caption is each clip's
 `gemini_caption` (Farsi) from the review sheet. Successfully-sent clips are
 recorded in `<clips-dir>/.telegram_sent.json`; **a rerun skips anything already

@@ -97,7 +97,9 @@ def get_me(cfg: TelegramConfig) -> dict:
     return data["result"]
 
 
-def send_video(video_path: Path, caption: str, cfg: TelegramConfig) -> dict:
+def send_video(video_path: Path, caption: str, cfg: TelegramConfig, silent: bool = False) -> dict:
+    """`silent` sends with disable_notification (no sound/buzz for the group) --
+    for posting at night (2026-11-10: the Nov-08 renders finished at 03:30)."""
     chat_id = os.environ.get(cfg.chat_id_env)
     if not chat_id:
         raise TelegramError(f"{cfg.chat_id_env} is not set")
@@ -109,10 +111,12 @@ def send_video(video_path: Path, caption: str, cfg: TelegramConfig) -> dict:
         )
 
     fields = {"chat_id": chat_id, "caption": caption, "supports_streaming": "true"}
+    if silent:
+        fields["disable_notification"] = "true"
     return _post("sendVideo", cfg, fields, "video", video_path)
 
 
-def send_message(text: str, cfg: TelegramConfig) -> dict:
+def send_message(text: str, cfg: TelegramConfig, silent: bool = False) -> dict:
     """Post a plain text announcement (no attachment) to the configured
     chat -- e.g. a note alongside a batch of posted clips, not a per-clip
     caption. JSON body via sendMessage, unlike sendVideo's multipart --
@@ -125,6 +129,9 @@ def send_message(text: str, cfg: TelegramConfig) -> dict:
         raise TelegramError(f"{cfg.chat_id_env} is not set")
 
     url = _API_URL.format(token=token, method="sendMessage")
-    payload = json.dumps({"chat_id": chat_id, "text": text}).encode("utf-8")
+    body: dict[str, object] = {"chat_id": chat_id, "text": text}
+    if silent:
+        body["disable_notification"] = True
+    payload = json.dumps(body).encode("utf-8")
     request = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
     return _send_with_retry(request, cfg, "sendMessage")

@@ -418,7 +418,7 @@ def cmd_export_picks(
 
 
 def cmd_telegram_post(
-    cfg: Config, review_sheet_path: str, clips_dir: str, clip_files: list[str], dry_run: bool
+    cfg: Config, review_sheet_path: str, clips_dir: str, clip_files: list[str], dry_run: bool, silent: bool = False
 ) -> None:
     """Post a user-specified subset of already-exported clips (by clip_file,
     same identifiers export-picks uses) to a Telegram group via sendVideo.
@@ -470,7 +470,7 @@ def cmd_telegram_post(
             continue
 
         print(f"Sending {i + 1}/{len(clip_files)}: {clip_file} ({size_mb:.1f}MB)...")
-        result = telegram.send_video(video_path, caption, cfg.telegram)
+        result = telegram.send_video(video_path, caption, cfg.telegram, silent=silent)
         sent_state[clip_file] = {
             "message_id": result["result"]["message_id"],
             "sent_at": datetime.now(timezone.utc).isoformat(),
@@ -481,7 +481,7 @@ def cmd_telegram_post(
         print(f"\nDone. {len(sent_state)} clip(s) recorded as sent in {sent_state_path}")
 
 
-def cmd_telegram_message(cfg: Config, text: str, text_file: str | None, dry_run: bool) -> None:
+def cmd_telegram_message(cfg: Config, text: str, text_file: str | None, dry_run: bool, silent: bool = False) -> None:
     """Post a one-off plain-text announcement to the same Telegram group
     telegram-post sends clips to -- e.g. a note about where to find raw
     footage. Prefer --text-file for anything non-ASCII (Farsi): passing RTL
@@ -500,7 +500,7 @@ def cmd_telegram_message(cfg: Config, text: str, text_file: str | None, dry_run:
 
     bot_info = telegram.get_me(cfg.telegram)
     print(f"Connected as @{bot_info.get('username', '?')}")
-    result = telegram.send_message(text, cfg.telegram)
+    result = telegram.send_message(text, cfg.telegram, silent=silent)
     print(f"Sent message_id={result['result']['message_id']}")
 
 
@@ -1526,6 +1526,9 @@ def main() -> None:
     telegram_post_parser.add_argument(
         "--dry-run", action="store_true", help="Validate files/captions/credentials and print what would be sent, without posting"
     )
+    telegram_post_parser.add_argument(
+        "--silent", action="store_true", help="Send without a notification sound/buzz for the group (night posting)"
+    )
     telegram_message_parser = subparsers.add_parser(
         "telegram-message",
         help="Post a one-off plain-text announcement to the Telegram group (no video attachment) via sendMessage.",
@@ -1538,6 +1541,9 @@ def main() -> None:
     )
     telegram_message_parser.add_argument(
         "--dry-run", action="store_true", help="Validate credentials and print what would be sent, without posting"
+    )
+    telegram_message_parser.add_argument(
+        "--silent", action="store_true", help="Send without a notification sound/buzz for the group (night posting)"
     )
     golden_score_parser = subparsers.add_parser(
         "golden-score", help="Score the current --strategy/config against a pre-built golden event set (no rendering)"
@@ -1771,10 +1777,10 @@ def main() -> None:
         )
     elif args.command == "telegram-post":
         cmd_telegram_post(
-            cfg, args.review_sheet, args.clips_dir, [c.strip() for c in args.clips.split(",")], args.dry_run
+            cfg, args.review_sheet, args.clips_dir, [c.strip() for c in args.clips.split(",")], args.dry_run, args.silent
         )
     elif args.command == "telegram-message":
-        cmd_telegram_message(cfg, args.text, args.text_file, args.dry_run)
+        cmd_telegram_message(cfg, args.text, args.text_file, args.dry_run, args.silent)
     elif args.command == "golden-score":
         cmd_golden_score(cfg, args.golden_events, args.vision)
     elif args.command == "vision-highlights":
