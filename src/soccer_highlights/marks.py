@@ -758,12 +758,18 @@ def slomo_center_source(
     owner: ResolvedMark | None,
     tap_lead_seconds: float = 3.0,
 ) -> str:
-    """What the slow-mo dot is anchored on (2026-11-08), one of SLOMO_SOURCES, or
-    "" when there is no dot (`slomo_center_seconds` is None). Picks the review
-    dot's colour: "peak" = yellow, "goal_tap" = blue, "moment_tap" = red. A `both`
-    clip is "peak" -- the dot sits on the audio peak its tap corroborated."""
+    """Which colour the review dot gets (2026-11-08), one of SLOMO_SOURCES, or ""
+    when there is no dot (`slomo_center_seconds` is None). Precedence, Kaveh's
+    rule: BLUE (goal tap) over RED (moment tap) over YELLOW (audio peak). A clip
+    that owns a located tap is coloured by that tap even when the dot's POSITION
+    sits on the audio peak the tap corroborated (a `both` clip) -- the colour says
+    "this clip is tapped", the position says where the action is."""
     anchor = _slomo_anchor(interval, source, owner, tap_lead_seconds)
-    return "" if anchor is None else anchor[1]
+    if anchor is None:
+        return ""
+    if owner is not None and owner.global_seconds is not None:
+        return "goal_tap" if owner.mark.category in _GOAL_CATEGORIES else "moment_tap"
+    return anchor[1]
 
 
 @dataclass

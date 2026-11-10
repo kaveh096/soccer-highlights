@@ -495,8 +495,10 @@ the same Gemini call -- the field is ordered last in the schema so it can't
 steer the score; blank = unknown = full frame at export) and `slomo_center_s`
 (seconds from the clip's start: the audio peak, or tap - 3s when the clip has
 no peak; this is where the dot shows) and `slomo_center_source`
-(`peak|goal_tap|moment_tap`, 2026-11-08: what the dot is anchored on, which
-picks its color; blank = no dot; a sheet without the column renders yellow).
+(`peak|goal_tap|moment_tap`, 2026-11-08: the dot's color, preferring blue
+(goal tap) > red (`moment` tap) > yellow (audio only), even when a tapped clip's
+dot position sits on its audio peak; blank = no dot; a sheet without the column
+renders yellow).
 
 **`--near-cam-team-first-half`** (added 2026-09-07): which team's SHOTS the
 camera captures in the FIRST half, i.e. the **attacking** team -- the
@@ -952,8 +954,8 @@ r09 slomo=4-7@0.5 crop=full   # custom speed; full = no crop
   Center-cam games still use Gemini's left/center/right. The boxes are tied to
   one camera mount: re-draw and re-confirm on a frame if the framing changes.
   Export width stays 2560, so the far box (~1440px of 4K) is upscaled ~1.8x.
-- The dot in each review clip marks the default slow-mo center (yellow = audio
-  peak, blue = goal tap, red = `moment` tap -- see `slomo_center_source`); the
+- The dot in each review clip marks the default slow-mo center (blue = the clip has a goal
+  tap, else red = a `moment` tap, else yellow = audio only -- see `slomo_center_source`); the
   cyan box is the crop export will use unless `crop=` overrides it.
 - `trim=N` (2026-10-19), N = the second on the review clip's own timeline where
   the goal/moment happens: exports [N-10, N+4] instead of the whole 40-110s

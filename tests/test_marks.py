@@ -860,8 +860,9 @@ def test_slomo_source_is_peak_for_audio_candidates_and_for_both_marks():
     iv = Interval(start_seconds=100.0, end_seconds=120.0, peaks=[GlobalPeak(112.0, score=0.9)])
     assert slomo_center_source(iv, "audio", None) == "peak"
     # a goal tap that corroborated an audio peak: the dot sits on the peak -> "audio" yellow
-    assert slomo_center_source(iv, "both", _owner("white_goal", 114.0, peak_time=112.0)) == "peak"
-    assert slomo_center_source(iv, "both", _owner("moment", 114.0, peak_time=112.0)) == "peak"
+    # a tap that corroborated a peak still colours the dot by the tap: blue > red > yellow
+    assert slomo_center_source(iv, "both", _owner("white_goal", 114.0, peak_time=112.0)) == "goal_tap"
+    assert slomo_center_source(iv, "both", _owner("moment", 114.0, peak_time=112.0)) == "moment_tap"
 
 
 def test_slomo_source_is_goal_tap_or_moment_tap_when_the_tap_fallback_is_used():

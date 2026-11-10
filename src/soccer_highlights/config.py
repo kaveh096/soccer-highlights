@@ -447,9 +447,10 @@ class ReviewOverlayConfig:
     Review clips only -- exports never get either."""
 
     # Dot: ~6% of frame width (was 1.5%, invisible on Oct-18; 4% before 2026-10-26), top-right corner, shown for dot_frames frames
-    # centred on slomo_center_s. Colour = what the dot is anchored on (2026-11-08):
-    # yellow = an audio peak, blue = a goal tap (no peak, tap - 3s), red = a
-    # `moment` tap (same fallback). Dark rim reads on grass, court and both shirts.
+    # centred on slomo_center_s. Colour = the clip's source (2026-11-08), always
+    # preferring blue (goal tap) > red (`moment` tap) > yellow (audio only), even
+    # when a tapped clip's dot position sits on its audio peak. Dark rim reads on
+    # grass, court and both shirts.
     dot_diameter_fraction: float = 0.06
     dot_margin_fraction: float = 0.012
     dot_frames: int = 36

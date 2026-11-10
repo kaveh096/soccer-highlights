@@ -308,12 +308,15 @@ marks) -> posted to a Telegram group with the Farsi caption.
   replay, true 4x from the 120fps source. The dot in each review clip
   marks the slow-mo center -- ONE dot (audio peak, else tap - 3s), because
   showing peak and tap separately was rejected as confusing. **The single
-  dot is colored by its source** (Kaveh, 2026-11-08): **yellow** = anchored
-  on an audio peak (audio-only clips AND tap clips that corroborated a peak
-  -- the dot sits on the peak), **blue** = anchored on a goal tap
-  (`white_goal`/`black_goal`, no peak, so tap - 3s), **red** = anchored on a
-  `moment` tap (same fallback). Sheet column `slomo_center_source`
-  (`peak|goal_tap|moment_tap`; older sheets lack it -> yellow). The replay
+  dot is colored by its source** (Kaveh, 2026-11-08), **always preferring
+  blue, then red, then yellow**: **blue** = the clip owns a goal tap
+  (`white_goal`/`black_goal`), **red** = it owns a `moment` tap, **yellow** =
+  neither (audio-only). The color is the TAP's even when the dot's position
+  sits on the audio peak that tap corroborated (`source=both`; position =
+  peak, else tap - 3s) -- the first version colored those yellow and Kaveh
+  corrected it on Nov-08 (r10, a tapped goal). Sheet column
+  `slomo_center_source` (`peak|goal_tap|moment_tap`; older sheets lack it ->
+  yellow). The replay
   wears a **REPLAY badge** (2026-10-19): a small panel under the scoreboard
   (flashing gold dot, "REPLAY", the speed), same dark panel/gold accent as the
   board, composited after the slow-mo stretch so it blinks in real playback
