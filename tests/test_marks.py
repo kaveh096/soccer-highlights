@@ -564,62 +564,47 @@ def test_score_for_interval_falls_back_to_the_midpoint_when_the_tap_is_outside_i
     assert cols.flip_team == "black"
 
 
-def test_review_tier_untapped_clip_still_falls_back_to_goal_this_end():
-    # No tap at all -- nothing to "value over Gemini", so goal_this_end alone
-    # still decides tier 1, same as before 2026-09-07.
-    assert review_tier(mark_category="", gemini_score=1, goal_this_end=True) == 1
-    assert review_tier(mark_category="", gemini_score=4, goal_this_end=False) == 3
-    assert review_tier(mark_category="", gemini_score=2, goal_this_end=False) == 5
+def test_review_tier_untapped_clips_are_everything_else_even_if_gemini_says_goal():
+    # 2026-11-11: no tap, nothing to trust over Gemini -- but no group above
+    # "everything else" either, whatever Gemini scores or claims.
+    assert review_tier(mark_category="", gemini_score=1, goal_this_end=True) == 4
+    assert review_tier(mark_category="", gemini_score=5, goal_this_end=False) == 4
 
 
-def test_review_tier_a_moment_tap_never_reaches_tier_1_even_if_gemini_calls_it_a_goal():
-    # 2026-09-07 (r03/r07 on Sep-06): an explicit non-goal tap overrides a
-    # contradicting Gemini goal claim outright -- it doesn't just fail to
-    # promote it, moment can never be tier 1.
-    assert review_tier(mark_category="moment", gemini_score=4, goal_this_end=True) == 2
-    assert review_tier(mark_category="moment", gemini_score=2, goal_this_end=True) == 4
+def test_review_tier_moment_tap_is_group_3_regardless_of_score_or_goal_claim():
+    for score in (1, 3, 5):
+        assert review_tier(mark_category="moment", gemini_score=score, goal_this_end=False) == 3
+    # an explicit non-goal tap overrides a Gemini goal claim (2026-09-07)
+    assert review_tier(mark_category="moment", gemini_score=4, goal_this_end=True) == 3
 
 
-def test_review_tier_moment_and_score_bands_below_tier_1():
-    assert review_tier(mark_category="moment", gemini_score=3, goal_this_end=False) == 2
-    assert review_tier(mark_category="", gemini_score=4, goal_this_end=False) == 3
-    assert review_tier(mark_category="moment", gemini_score=1, goal_this_end=False) == 4
-    assert review_tier(mark_category="", gemini_score=2, goal_this_end=False) == 5
-
-
-def test_review_tier_goal_tap_ignores_gemini_when_near_cam_info_is_available():
-    # 2026-09-07: once a real goal tap AND the per-game camera config are
-    # both available, goal_this_end is not consulted at all -- taps win the
-    # conflict in both directions.
+def test_review_tier_goal_taps_split_near_and_far_ignoring_gemini():
     assert review_tier(mark_category="black_goal", gemini_score=1, goal_this_end=False, is_near_cam_goal=True) == 1
-    assert review_tier(mark_category="black_goal", gemini_score=5, goal_this_end=True, is_near_cam_goal=False) == 3
+    assert review_tier(mark_category="black_goal", gemini_score=5, goal_this_end=True, is_near_cam_goal=False) == 2
 
 
 def test_review_tier_goal_tap_falls_back_to_goal_this_end_without_camera_config():
-    # is_near_cam_goal=None means the per-game camera config wasn't given --
-    # degrades to the pre-2026-09-07 goal_this_end-driven behavior.
     assert review_tier(mark_category="white_goal", gemini_score=2, goal_this_end=True, is_near_cam_goal=None) == 1
-    assert review_tier(mark_category="white_goal", gemini_score=2, goal_this_end=False, is_near_cam_goal=None) == 5
+    assert review_tier(mark_category="white_goal", gemini_score=2, goal_this_end=False, is_near_cam_goal=None) == 2
 
 
-def test_review_tier_the_clap_sync_moment_skips_the_moment_boost():
-    # Same inputs as a normal promoted moment, except is_sync_clap=True --
-    # the kickoff clap-sync tap is a timing reference, not a real candidate,
-    # so it must NOT land in tier 2 or 4 just for being mark_category=moment.
-    assert review_tier(mark_category="moment", gemini_score=3, goal_this_end=False, is_sync_clap=True) == 5
-    assert review_tier(mark_category="moment", gemini_score=1, goal_this_end=False, is_sync_clap=True) == 5
-    # A high enough plain score still earns tier 3 on its own merits.
-    assert review_tier(mark_category="moment", gemini_score=4, goal_this_end=False, is_sync_clap=True) == 3
+def test_review_tier_the_clap_sync_moment_is_everything_else():
+    # the kickoff clap-sync tap is a timing reference, not a highlight
+    for score in (1, 3, 5):
+        assert review_tier(mark_category="moment", gemini_score=score, goal_this_end=False, is_sync_clap=True) == 4
 
 
-def test_review_sort_key_orders_tiers_then_score_then_time():
+def test_review_sort_key_groups_then_score_desc_then_time_asc():
     clips = [
-        ("far_goal_score2", "black_goal", 2, False, 500.0, False),
-        ("near_goal_score3", "black_goal", 3, False, 300.0, True),
-        ("moment_score3", "moment", 3, False, 100.0, False),
+        ("plain_score5", "", 5, False, 5.0, None),
+        ("moment_score1", "moment", 1, False, 20.0, None),
+        ("far_goal_score2_late", "black_goal", 2, False, 500.0, False),
+        ("near_goal_score3_late", "black_goal", 3, False, 300.0, True),
+        ("moment_score4", "moment", 4, False, 100.0, None),
         ("near_goal_score5", "white_goal", 5, False, 10.0, True),
-        ("plain_score4", "", 4, False, 50.0, False),
-        ("moment_score1", "moment", 1, False, 20.0, False),
+        ("near_goal_score3_early", "white_goal", 3, False, 30.0, True),
+        ("far_goal_score2_early", "white_goal", 2, False, 40.0, False),
+        ("plain_score2", "", 2, False, 1.0, None),
     ]
     ranked = sorted(
         clips,
@@ -628,12 +613,15 @@ def test_review_sort_key_orders_tiers_then_score_then_time():
         ),
     )
     assert [name for name, *_ in ranked] == [
-        "near_goal_score5",  # tier 1, higher score
-        "near_goal_score3",  # tier 1, lower score
-        "moment_score3",  # tier 2
-        "plain_score4",  # tier 3
-        "moment_score1",  # tier 4
-        "far_goal_score2",  # tier 5
+        "near_goal_score5",  # group 1: score desc
+        "near_goal_score3_early",  # score tie -> time asc
+        "near_goal_score3_late",
+        "far_goal_score2_early",  # group 2
+        "far_goal_score2_late",
+        "moment_score4",  # group 3
+        "moment_score1",
+        "plain_score5",  # group 4
+        "plain_score2",
     ]
 
 
@@ -810,8 +798,8 @@ def test_no_sync_clap_marks_nothing_so_the_first_moment_keeps_its_boost():
     owners = [_owner("moment", 900.0), _owner("moment", 300.0)]
     flags = sync_clap_flags(owners, enabled=False)
     assert flags == [False, False]
-    assert review_tier("moment", 3, False, is_sync_clap=flags[1]) == 2
-    assert review_tier("moment", 3, False, is_sync_clap=True) == 5  # what the clap flag would have cost it
+    assert review_tier("moment", 3, False, is_sync_clap=flags[1]) == 3
+    assert review_tier("moment", 3, False, is_sync_clap=True) == 4  # what the clap flag would have cost it
 
 
 def test_slomo_center_uses_the_strongest_audio_peak_relative_to_clip_start():

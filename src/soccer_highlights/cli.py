@@ -1147,8 +1147,10 @@ def _wall_clock_tag(global_seconds: float, chunks: list[Chunk]) -> str:
 def cmd_name_candidates(cfg: Config, review_dir: str, revert: bool = False) -> None:
     """Rename pre-label candidate clips to ``r01_s4_746a_c002.mp4`` -- review
     rank, Gemini score, wall-clock time, canonical id -- so the folder's
-    default A-Z sort *is* the review order (best first, chronological within a
-    score band) instead of burying the interesting clips among the 2s.
+    default A-Z sort *is* the review order (near goals, far goals, moments,
+    everything else; within a group Gemini score descending, then game time
+    ascending -- see marks.review_sort_key) instead of burying the interesting
+    clips among the 2s.
 
     Renames in place and rewrites ``clip_file`` in both review_sheet.csv and
     descriptions_cache.json in the same pass, so the cache's position-keyed

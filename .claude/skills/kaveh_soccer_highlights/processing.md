@@ -699,24 +699,28 @@ stale the moment another describe retry lands).
 
 Renames `clip_002.mp4` -> `r01_s4_746a_c002.mp4`: **r**eview rank, gemini
 **s**core, wall-clock time, and the canonical **c**lip id. The point is that the
-folder's default A-Z sort becomes the review order (best first, chronological
-within a score band) instead of burying the good clips among the 2s.
+folder's default A-Z sort becomes the review order (four groups, see below)
+instead of burying the good clips among the 2s.
 
 Sanity check the ranking before trusting it: tier-1 goal clips' Gemini
 descriptions should read as near-goal; if they say "far end", the
 `--near-cam-team-first-half` flag was given the wrong team (see Step 1).
 
-**On a watch-tagged sheet, rank is tiered, not just score-sorted** (revised
-2026-09-07, `marks.review_tier`): tier 1 is a genuine goal tap
-(`white_goal`/`black_goal`) confirmed near-cam by `--near-cam-team-first-half`,
-or (no tap at all) `goal_this_end`; tier 2 is a `moment` tap Gemini still
-rates >=3; tier 3 is any other clip scoring >=4; tier 4 is any other `moment`
-tap; tier 5 is everything else by score. A `moment` tap never reaches tier 1
-even if Gemini claims a goal -- see SKILL.md's settled-decisions list for the
-full "taps beat Gemini" rationale. A sheet without `mark_category`/
-`goal_this_end` (an older or audio-only game) falls back to the original
-plain score-desc sort, unchanged. With `--camera-position center`, every
-genuine goal tap is tier 1 (both goals are in view).
+**On a watch-tagged sheet, rank is four plain groups** (Kaveh, 2026-11-11,
+`marks.review_tier`; replaced the 2026-09-07 five-tier scheme): group 1 = near
+goals (a `white_goal`/`black_goal` tap at the camera's end, per
+`--near-cam-team-first-half` + halftime), group 2 = far goals (any other goal
+tap), group 3 = moments (a `moment` tap; the kickoff clap-sync tap excluded),
+group 4 = everything else (untapped clips, even ones Gemini calls a goal, and
+the clap-sync tap). WITHIN each group: Gemini score descending, then game time
+ascending. `rNN_` is the global rank over that order, so a plain A-Z sort of
+the folder reads group 1, 2, 3, 4. Taps still beat Gemini for group
+membership (a `moment` tap is never a goal group, whatever Gemini claims --
+SKILL.md, "taps beat Gemini"); Gemini's score only orders clips inside a
+group. A sheet without `mark_category`/`goal_this_end` (an older or audio-only
+game) falls back to the original plain score-desc sort. With
+`--camera-position center`, every genuine goal tap is group 1 (both goals are in
+view; group 2 is empty).
 
 - The `c0NN` token is what keeps every rename reversible and keeps the review
   sheet, the describe cache, `export-picks` and `telegram-post` all resolving to

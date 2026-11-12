@@ -631,56 +631,28 @@ def review_tier(
     is_near_cam_goal: bool | None = None,
     is_sync_clap: bool = False,
 ) -> int:
-    """Bucket a pre-label candidate into a review-order tier -- lower reviews
-    first. Revised 2026-09-07 after reviewing Sep-06's real ranked sheet:
-    Kaveh found Gemini false-positive goal calls on `moment`-tagged clips he
-    knew weren't goals, and asked that **taps beat Gemini** whenever they
-    actively disagree, using the per-game camera setup rather than
-    `goal_this_end` to judge a genuine goal tap's visibility:
+    """Review-order group for a pre-label candidate -- lower reviews first.
+    Redesigned 2026-11-11 (Kaveh) as four plain groups, driven by the TAPS
+    (taps beat Gemini, 2026-09-07); `gemini_score` no longer picks the group,
+    it only orders clips *within* one (see `review_sort_key`):
 
-    1. A genuine goal tap (`white_goal`/`black_goal`) at the camera's own
-       end of the field, per `is_near_cam_goal` -- Gemini is NOT consulted
-       here at all once a real goal tap exists. `is_near_cam_goal=None`
-       (the per-game camera config wasn't given) falls back to
-       `goal_this_end`, i.e. today's pre-2026-09-07 behavior, unchanged.
-    2. A `moment`-tagged, non-goal candidate Gemini still rates >=3 -- but
-       NEVER a case where `goal_this_end=True` contradicts the moment tap;
-       an explicit non-goal tap overrides Gemini's goal claim outright, it
-       doesn't just fail to promote it (2026-09-07: r03/r07 on Sep-06 were
-       exactly this -- Kaveh's own moment tap said "not a goal", Gemini said
-       "goal", and Gemini was wrong both times).
-    3. Any other candidate Gemini rates >=4 (a highlight regardless of
-       source) -- including a goal tap that failed its near-cam check, or
-       an untapped clip with no `goal_this_end` signal to lean on.
-    4. Any other `moment`-tagged candidate, whatever its score.
-    5. Everything else.
+    1. Near goals: a genuine goal tap (`white_goal`/`black_goal`) at the
+       camera's own end (`is_near_cam_goal`). With no camera config
+       (`is_near_cam_goal=None`) Gemini's `goal_this_end` stands in.
+    2. Far goals: any other genuine goal tap.
+    3. Moments: a `moment` tap (the kickoff clap-sync tap excluded -- it is a
+       timing reference, not a highlight) whatever Gemini scores it.
+    4. Everything else: untapped clips (even ones Gemini calls a goal -- no
+       tap, nothing to trust over it) and the clap-sync tap.
 
-    An untapped clip (`mark_category=""`) has nothing to "value over
-    Gemini" -- there's no tap, so `goal_this_end` alone still decides tier 1
-    for it, same as before.
-
-    `is_sync_clap` (2026-09-06): the clap-sync `moment` tap at kickoff
-    (Step 0c) is a timing reference, not a real highlight candidate --
-    never earns the tier 2/4 moment boost even though its mark_category is
-    genuinely "moment". A caller identifies it as the game's
-    chronologically-first `moment` mark."""
+    `goal_this_end` is consulted only as the no-camera-config fallback for a
+    goal tap; `gemini_score` is accepted for call-site compatibility."""
     if mark_category in _GOAL_CATEGORIES:
-        if is_near_cam_goal is None:
-            if goal_this_end:
-                return 1
-        elif is_near_cam_goal:
-            return 1
-    elif mark_category == "moment":
-        if not is_sync_clap and gemini_score >= 3:
-            return 2
-    elif goal_this_end:
-        return 1
-
-    if gemini_score >= 4:
-        return 3
+        near = goal_this_end if is_near_cam_goal is None else is_near_cam_goal
+        return 1 if near else 2
     if mark_category == "moment" and not is_sync_clap:
-        return 4
-    return 5
+        return 3
+    return 4
 
 
 def review_sort_key(

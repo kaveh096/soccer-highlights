@@ -134,6 +134,12 @@ marks) -> posted to a Telegram group with the Farsi caption.
   lost or wrongly timestamped), the camera position is per-game config rather
   than a watch button, and there is no dedicated sync button (the clap +
   `moment` tap IS the sync).
+- **Review order is four tap-driven groups (Kaveh, 2026-11-11): near goals,
+  far goals, moments, everything else; inside each, Gemini score descending
+  then game time ascending** (`marks.review_tier` / `review_sort_key`; detail in
+  processing.md Step 1b). The history below explains why taps, not Gemini,
+  decide group membership -- its "tier 1/2/3..." wording predates the
+  four-group scheme.
 - **Review order trusts taps over Gemini when they actively disagree**
   (Kaveh, 2026-09-07, after reviewing Sep-06's real ranked sheet and finding
   Gemini goal false positives on clips he'd explicitly tapped `moment`, i.e.
