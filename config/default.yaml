@@ -110,16 +110,20 @@ crop:
   # a goal tap at the near goal crops `near`, at the far goal `far`; every other
   # clip crops `wide` (the whole field) unless a pick says `crop=...`. Tied to
   # ONE camera mount -- re-draw them and re-confirm on a reference frame before
-  # every game (SKILL.md Step 0e). Current values: Nov-08 mount (near goal at the
-  # right frame edge, far pop-up goal left of centre; Kaveh picked near B, far A,
-  # wide D = one step wider than C so the left court lines are in). Previous
-  # mount, Nov-01: near [0.45, 0.269444, 0.55, 0.55], far [0.375, 0.444444, 0.3,
-  # 0.3], wide [0.351563, 0.245833, 0.552, 0.552]. Oct-25: near [0.0, 0.073611,
-  # 0.73125, 0.73125], far [0.40625, 0.326389, 0.375, 0.375].
+  # every game (SKILL.md Step 0e). Current values: Nov-15 mount (near goal ~150px
+  # in from the right edge, far pop-up goal left of centre). Kaveh picked near B,
+  # far C, wide E, then asked for near and far 1.2x bigger (2026-11-16) and far
+  # another 1.1x (2026-11-20, it cut off the corner buildings). Before those two
+  # scalings: near [0.50, 0.30, 0.50, 0.50], far [0.40, 0.42, 0.20, 0.20] (and
+  # [0.38, 0.40, 0.24, 0.24] after the first). Previous mounts -- Nov-08: near
+  # [0.55, 0.34, 0.45, 0.45], far [0.37, 0.40, 0.25, 0.25], wide [0.20, 0.20,
+  # 0.80, 0.80]. Nov-01: near [0.45, 0.269444, 0.55, 0.55], far [0.375, 0.444444,
+  # 0.3, 0.3], wide [0.351563, 0.245833, 0.552, 0.552]. Oct-25: near [0.0,
+  # 0.073611, 0.73125, 0.73125], far [0.40625, 0.326389, 0.375, 0.375].
   boxes:
-    near: [0.55, 0.34, 0.45, 0.45]              # near goal at the right edge + field in front (B)
-    far: [0.37, 0.40, 0.25, 0.25]               # tiny far pop-up goal + field in front (A, tight)
-    wide: [0.20, 0.20, 0.80, 0.80]              # the whole field, both goals, left lines (D)
+    near: [0.40, 0.25, 0.60, 0.60]              # near goal + field in front, anchored right (B x1.2)
+    far: [0.368, 0.388, 0.264, 0.264]           # tiny far pop-up goal + field in front (C x1.2 x1.1, same centre)
+    wide: [0.15, 0.15, 0.85, 0.85]              # the whole field, both goals, left lines (E)
 
 review_overlay:
   # Burned into the 1280px review clips after Gemini scores the clean ones.
