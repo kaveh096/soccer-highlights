@@ -13,9 +13,9 @@ from pathlib import Path
 
 from soccer_highlights import scoreboard
 from soccer_highlights.clipping import concat_clips
-from soccer_highlights.config import ExportConfig, ReviewConfig
+from soccer_highlights.config import CropConfig, ExportConfig, ReviewConfig
 from soccer_highlights.discovery import Chunk, slice_start_epoch
-from soccer_highlights.picks import SlowMo
+from soccer_highlights.picks import ResolvedPick, SlowMo, rect_for_region
 from soccer_highlights.timeline import ChunkSlice, Interval, map_interval_to_chunks
 
 # Crop window as frame fractions (x0, y0, w, h) -- see soccer_highlights.crop.
@@ -327,6 +327,7 @@ def _encode_piece(
     piece_start: float = 0.0,
     crop: Rect | None = None,
     slomo_speed: float | None = None,
+    show_speed: bool = True,
 ) -> None:
     """Encode one piece. `epoch_base` (Unix epoch of the piece's first frame)
     burns a wall-clock overlay on, and `score` burns a running goal counter
@@ -391,7 +392,12 @@ def _encode_piece(
         after setpts would make the clock run `1/speed` times too fast.
     Audio is a silent track (anullsrc) in the live part's rate/layout: the
     source audio would be wrong for slow-mo, and Telegram/concat need a track
-    present across the whole file."""
+    present across the whole file.
+
+    A `stitch` replay (2026-11-20) goes through the same replay branch with its
+    own crop and `slomo_speed` (1.0 = normal speed); `show_speed=False` drops the
+    speed from its REPLAY badge when it is 1x. At exactly 1x it keeps the source
+    audio (the silent track applies only to a slowed replay, 2026-11-21)."""
     audio_args = ["-ac", "1"] if cfg.mono_audio else []
     replay = slomo_speed is not None
     head = ",".join(([_crop_filter(crop)] if crop is not None else []) + [_scale_filter(cfg.max_width)])
@@ -400,8 +406,12 @@ def _encode_piece(
     pre_chain = head if replay else f"{head},fps={cfg.fps}"
     post_chain = f",{_slomo_pts_filter(slomo_speed)},fps={cfg.fps}" if replay else ""
     out_duration = duration / slomo_speed if replay else duration
+    # A replay is muted (silent track) only when it is slowed: slowed source audio
+    # would be wrong. At 1x (a stitch replay, Kaveh 2026-11-21) the source audio
+    # is exactly right and is kept.
+    muted = replay and slomo_speed != 1.0
     silent_audio: list[str] = []
-    if replay:
+    if muted:
         audio = probe_audio(source_path)
         if audio is not None:
             silent_audio = [
@@ -428,14 +438,16 @@ def _encode_piece(
             f"[bg]{','.join(stages)}{post_chain}[vout]"
         )
         # Replay: the silent track is input 2 (after source and chrome).
-        audio_maps = (["-map", "2:a"] if silent_audio else []) if replay else ["-map", "0:a?"]
+        audio_maps = (["-map", "2:a"] if silent_audio else []) if muted else ["-map", "0:a?"]
         badge_inputs: list[str] = []
         if replay and cfg.replay_badge:
             # REPLAY badge under the board, composited AFTER the pts stretch and
             # fps so `t` is output time: the dot's blink period is then what the
             # viewer sees, not 1/speed of it. Its own inputs come after the
             # silent track (if any) so the existing map indexes don't move.
-            badge_png, dot_png, badge = scoreboard.replay_badge_pngs(cfg, cfg.max_width, slomo_speed)
+            badge_png, dot_png, badge = scoreboard.replay_badge_pngs(
+                cfg, cfg.max_width, slomo_speed, show_speed
+            )
             first = 2 + (1 if silent_audio else 0)
             badge_inputs = ["-loop", "1", "-i", str(badge_png), "-loop", "1", "-i", str(dot_png)]
             blink = f"lt(mod(t*{cfg.replay_badge_flash_hz:g},1),0.6)"
@@ -470,7 +482,9 @@ def _encode_piece(
     video_filter += post_chain
     # The replay needs explicit maps (its silent track is a second input); the
     # live path keeps its implicit stream selection, byte-for-byte as before.
-    replay_maps = ["-map", "0:v:0", *(["-map", "1:a"] if silent_audio else [])] if replay else []
+    replay_maps = ["-map", "0:v:0", *(["-map", "1:a"] if silent_audio else [])] if muted else (
+        ["-map", "0:v:0", "-map", "0:a?"] if replay else []
+    )
     _run_ffmpeg(
         [
             "-ss", f"{start:.3f}",
@@ -509,11 +523,19 @@ def render_review_clip(slices: list[ChunkSlice], out_path: Path, tmp_dir: Path, 
 
 @dataclass(frozen=True)
 class Replay:
-    """A slow-motion replay mapped onto source chunks. `slices` is normally one
-    piece; it is several only if the window straddles a recording boundary."""
+    """A replay (slow-mo or stitch) mapped onto source chunks. `slices` is
+    normally one piece; it is several only if the window straddles a recording
+    boundary.
 
-    slomo: SlowMo
+    `own_crop` marks a stitch: its pieces are cut with `crop` (None = full frame)
+    instead of the crop the live part uses. `show_speed` is whether the REPLAY
+    badge prints the speed."""
+
+    slomo: SlowMo  # window + speed; a stitch reuses it (speed 1.0 = normal)
     slices: list[ChunkSlice]
+    crop: Rect | None = None
+    own_crop: bool = False
+    show_speed: bool = True
 
 
 @dataclass(frozen=True)
@@ -526,14 +548,25 @@ class ReplayPiece:
     epoch_base: float
     clip_offset: float  # offset of this piece's first frame into the whole clip (true time)
     speed: float
+    crop: Rect | None = None
+    own_crop: bool = False
+    show_speed: bool = True
 
     @property
     def output_seconds(self) -> float:
         return self.duration / self.speed
 
 
-def build_replay(clip: Interval, slomo: SlowMo, chunks: list[Chunk]) -> Replay:
-    """Map a clip-relative slow-mo window onto the source chunks.
+def build_replay(
+    clip: Interval,
+    slomo: SlowMo,
+    chunks: list[Chunk],
+    crop: Rect | None = None,
+    own_crop: bool = False,
+    show_speed: bool = True,
+    label: str = "slow-mo",
+) -> Replay:
+    """Map a clip-relative replay window onto the source chunks.
 
     Clip-relative t=0 is the sheet row's start_seconds, which is both the
     review clip's first frame and the export's first frame (review clips and
@@ -545,8 +578,35 @@ def build_replay(clip: Interval, slomo: SlowMo, chunks: list[Chunk]) -> Replay:
     )
     slices = map_interval_to_chunks(window, chunks)
     if not slices:
-        raise ValueError(f"slow-mo window {slomo.start_seconds:g}-{slomo.end_seconds:g}s maps onto no source footage")
-    return Replay(slomo=slomo, slices=slices)
+        raise ValueError(f"{label} window {slomo.start_seconds:g}-{slomo.end_seconds:g}s maps onto no source footage")
+    return Replay(slomo=slomo, slices=slices, crop=crop, own_crop=own_crop, show_speed=show_speed)
+
+
+def footage_shortfall(interval: Interval, slices: list[ChunkSlice]) -> float:
+    """Seconds of `interval` that no source chunk covers (the footage ended, or the
+    camera was stopped there) -- for warning about an `extend=N` that runs dry."""
+    covered = sum(cs.local_end_seconds - cs.local_start_seconds for cs in slices)
+    return max(0.0, (interval.end_seconds - interval.start_seconds) - covered)
+
+
+def build_pick_replay(pick: ResolvedPick, clip: Interval, chunks: list[Chunk], crop_cfg: CropConfig) -> Replay | None:
+    """The replay a resolved pick asks for, or None: its slow-mo, or its stitch
+    (cut with the stitch's own crop, resolved through the same box lookup as
+    `crop=`, so a config box change applies). Mapped from the row's FULL interval
+    `clip`, since both are on the review clip's original timeline."""
+    if pick.slomo is not None:
+        return build_replay(clip, pick.slomo, chunks)
+    if pick.stitch is not None:
+        return build_replay(
+            clip,
+            pick.stitch.window(),
+            chunks,
+            crop=rect_for_region(pick.stitch.crop, crop_cfg),
+            own_crop=True,
+            show_speed=pick.stitch.speed != 1.0,
+            label="stitch",
+        )
+    return None
 
 
 def replay_pieces(replay: Replay) -> list[ReplayPiece]:
@@ -562,6 +622,9 @@ def replay_pieces(replay: Replay) -> list[ReplayPiece]:
                 epoch_base=slice_start_epoch(cs.chunk, cs.local_start_seconds),
                 clip_offset=offset,
                 speed=replay.slomo.speed,
+                crop=replay.crop,
+                own_crop=replay.own_crop,
+                show_speed=replay.show_speed,
             )
         )
         offset += duration
@@ -571,9 +634,13 @@ def replay_pieces(replay: Replay) -> list[ReplayPiece]:
 def encode_replay_piece(
     piece: ReplayPiece, out_path: Path, cfg: ExportConfig, score: ScoreOverlay | None = None, crop: Rect | None = None
 ) -> None:
+    """Encode one replay piece. `crop` is the LIVE part's crop; a stitch piece
+    brings its own and ignores it."""
+    extra = {} if piece.show_speed else {"show_speed": False}
     _encode_piece(
         piece.source_path, piece.start, piece.duration, out_path, cfg,
-        piece.epoch_base, score, piece.clip_offset, crop, piece.speed,
+        piece.epoch_base, score, piece.clip_offset, piece.crop if piece.own_crop else crop, piece.speed,
+        **extra,
     )
 
 
@@ -604,6 +671,9 @@ def render_export_clip(
     layout as the live part, so the join is the same stream-copy concat that
     already joins chunk-spanning pieces -- no third, quality-losing re-encode
     of the whole clip.
+
+    A stitch replay (2026-11-20) is appended exactly like a slow-mo one (its
+    pieces carry their own crop and speed, see `build_pick_replay`).
 
     `replay_score` (2026-10-19): for a trimmed pick `score` is rebased onto the
     trimmed window, but the replay is timed on the ORIGINAL clip timeline

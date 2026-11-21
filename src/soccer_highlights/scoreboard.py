@@ -219,7 +219,9 @@ def speed_label(speed: float) -> str:
     return f"{speed:g}×"
 
 
-def compute_badge_layout(cfg: ExportConfig, board: ScoreboardLayout, speed: float) -> ReplayBadgeLayout:
+def compute_badge_layout(
+    cfg: ExportConfig, board: ScoreboardLayout, speed: float, show_speed: bool = True
+) -> ReplayBadgeLayout:
     k = board.height / (60 + 24 * 2)  # same recovered scale as render_chrome
 
     def s(v: float) -> int:
@@ -232,12 +234,13 @@ def compute_badge_layout(cfg: ExportConfig, board: ScoreboardLayout, speed: floa
     flabel = _font(cfg.scoreboard_font_narrow, font_label)
     fspeed = _font(cfg.burn_in_font_path, font_speed)
     label_w = _text_width(probe, "REPLAY", flabel)
-    speed_w = _text_width(probe, speed_label(speed), fspeed)
     x_label = pad + dot_d + gap
     x_rule = x_label + label_w + gap
     x_speed = x_rule + gap
+    # `show_speed=False` (a normal-speed stitched replay) is the bare REPLAY pill.
+    width = x_speed + _text_width(probe, speed_label(speed), fspeed) + pad if show_speed else x_label + label_w + pad
     return ReplayBadgeLayout(
-        width=x_speed + speed_w + pad,
+        width=width,
         height=s(60),
         x=board.inset,
         y=board.inset + board.height + s(10),
@@ -251,7 +254,9 @@ def compute_badge_layout(cfg: ExportConfig, board: ScoreboardLayout, speed: floa
     )
 
 
-def render_replay_badge(cfg: ExportConfig, badge: ReplayBadgeLayout, speed: float) -> Image.Image:
+def render_replay_badge(
+    cfg: ExportConfig, badge: ReplayBadgeLayout, speed: float, show_speed: bool = True
+) -> Image.Image:
     """The static half of the badge: the same dark panel as the board, the word
     REPLAY, a gold rule, the speed. The dot is a separate same-size image
     (`render_replay_dot`) so ffmpeg can blink it without blinking the text."""
@@ -261,6 +266,8 @@ def render_replay_badge(cfg: ExportConfig, badge: ReplayBadgeLayout, speed: floa
     d.rounded_rectangle([0, 0, badge.width - 1, badge.height - 1], radius=max(1, round(14 * k)), fill=_PANEL)
     cy = badge.height / 2
     d.text((badge.x_label, cy), "REPLAY", font=_font(cfg.scoreboard_font_narrow, badge.font_label), fill=_W_FILL, anchor="lm")
+    if not show_speed:
+        return im
     rule_h = round(badge.height * 0.46)
     d.line([badge.x_rule, cy - rule_h / 2, badge.x_rule, cy + rule_h / 2], fill=_ACCENT, width=3)
     d.text((badge.x_speed, cy), speed_label(speed), font=_font(cfg.burn_in_font_path, badge.font_speed), fill=_MUTED, anchor="lm")
@@ -276,18 +283,21 @@ def render_replay_dot(badge: ReplayBadgeLayout) -> Image.Image:
     return im
 
 
-def replay_badge_pngs(cfg: ExportConfig, frame_width: int, speed: float) -> tuple[Path, Path, ReplayBadgeLayout]:
+def replay_badge_pngs(
+    cfg: ExportConfig, frame_width: int, speed: float, show_speed: bool = True
+) -> tuple[Path, Path, ReplayBadgeLayout]:
     """(badge_png, dot_png, layout), cached in the system temp dir by a hash of
-    everything that affects the pixels -- same scheme as `chrome_png`."""
+    everything that affects the pixels -- same scheme as `chrome_png`.
+    `show_speed=False` draws REPLAY without the speed (stitch at 1x)."""
     board = compute_layout(cfg, frame_width)
-    badge = compute_badge_layout(cfg, board, speed)
+    badge = compute_badge_layout(cfg, board, speed, show_speed)
     key = "|".join(
         str(x)
         for x in (
-            "badge-v1",
+            "badge-v1" if show_speed else "badge-v1-nospeed",
             frame_width,
             cfg.scoreboard_scale,
-            speed_label(speed),
+            speed_label(speed) if show_speed else "",
             cfg.burn_in_font_path,
             cfg.scoreboard_font_narrow,
         )
@@ -297,7 +307,7 @@ def replay_badge_pngs(cfg: ExportConfig, frame_width: int, speed: float) -> tupl
     badge_path = tmp / f"soccer_hl_badge_{digest}.png"
     dot_path = tmp / f"soccer_hl_badge_dot_{digest}.png"
     if not badge_path.exists():
-        render_replay_badge(cfg, badge, speed).save(badge_path)
+        render_replay_badge(cfg, badge, speed, show_speed).save(badge_path)
     if not dot_path.exists():
         render_replay_dot(badge).save(dot_path)
     return badge_path, dot_path, badge

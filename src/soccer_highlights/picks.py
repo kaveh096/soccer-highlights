@@ -7,8 +7,8 @@ picks so the same text works inline as `--picks "r03; r05 crop=left"`). Tokens
 are separated by whitespace and/or commas; the rank and the keys are
 case-insensitive (`R01 trim=31, slomo` == `r01 trim=31 slomo`):
 
-    <rank> [crop=left|center|right|full] [trim=N]
-           [slomo | slomo=A-B | slomo=A-B@S | slomo@S]
+    <rank> [crop=near|far|wide|left|center|right|full] [trim=N | trim=A-B] [extend=N]
+           [slomo | slomo=A-B | slomo=A-B@S | slomo@S] [stitch=A-B@CROP[@S]]
 
     r03
     r05 crop=left
@@ -16,6 +16,10 @@ case-insensitive (`R01 trim=31, slomo` == `r01 trim=31 slomo`):
     r07 slomo=6.5-9
     r09 slomo=4-7@0.5 crop=full
     r04 trim=58
+    r01 slomo trim=0-25
+    r23 extend=6
+    r55 stitch=20-26@far
+    r55 stitch=20-26@far@0.5
 
 `<rank>` is the `rN` prefix of the rank-named clip_file `name-candidates`
 produces (`r03_s5_746a_c032.mp4`); a full clip_file name (or its stem) is also
@@ -28,6 +32,15 @@ Kaveh sees in the review player is what the number means.
 candidates; Kaveh supplies ONE number, the second the goal/moment happens, and
 `trim_window` turns it into the exported sub-interval. The slow-mo window stays
 on the ORIGINAL review-clip timeline whether or not the pick is trimmed.
+
+`trim=A-B` (2026-11-20): Kaveh usually gives start-end seconds when shortening a
+long clip. It exports exactly [A, B] of the review clip's timeline and is NEVER
+auto-stretched to cover the score-flip tap (`explicit_trim_window`).
+`extend=N` adds N seconds of SOURCE footage after the live window (the review
+clip's end, or B), past what the review clip shows. `stitch=A-B@CROP[@S]`
+appends a replay (muted only if slowed) of review-clip seconds [A, B] cut with a different crop
+at normal speed (or S), after the live clip; it reuses the slow-mo replay
+machinery and cannot be combined with `slomo` yet.
 
 Pure module: no ffmpeg, no filesystem. Everything is validated up front and
 ALL bad lines are reported together -- a ~37x-realtime export batch must not
@@ -59,10 +72,16 @@ MIN_SLOMO_SPEED = 0.05
 MAX_SLOMO_SPEED = 1.0
 # Shorter windows round to a handful of frames.
 MIN_SLOMO_WINDOW_SECONDS = 0.25
+# `extend=N` takes extra seconds from the source; past this it is a different clip.
+MAX_EXTEND_SECONDS = 30.0
+# A stitched replay plays at normal speed unless the pick says otherwise.
+DEFAULT_STITCH_SPEED = 1.0
 
 _NUM = r"\d+(?:\.\d+)?"
 _SLOMO_RE = re.compile(rf"^slomo(?:=(?P<a>{_NUM})-(?P<b>{_NUM}))?(?:@(?P<s>{_NUM}))?$")
-_TRIM_RE = re.compile(rf"^trim=(?P<n>{_NUM})$")
+_TRIM_RE = re.compile(rf"^trim=(?P<a>{_NUM})(?:-(?P<b>{_NUM}))?$")
+_EXTEND_RE = re.compile(rf"^extend=(?P<n>{_NUM})$")
+_STITCH_RE = re.compile(rf"^stitch=(?P<a>{_NUM})-(?P<b>{_NUM})@(?P<crop>[a-z]+)(?:@(?P<s>{_NUM}))?$")
 _RANK_RE = re.compile(r"^r(\d+)$", re.IGNORECASE)
 # Leading rank(s) of a clip_file: `r03_...`, and the merged `r30_31_s2_...`
 # that Step 4b post sheets produce (both ranks address the merged clip).
@@ -95,6 +114,26 @@ class SlowMo:
 
 
 @dataclass(frozen=True)
+class Stitch:
+    """A replay of clip-relative seconds [start, end], cut with its own `crop`
+    (a `crop=` value, resolved at export through the same box lookup), appended
+    after the live clip at `speed` (1.0 = normal)."""
+
+    start_seconds: float
+    end_seconds: float
+    crop: str
+    speed: float = DEFAULT_STITCH_SPEED
+
+    def window(self) -> SlowMo:
+        """The same (start, end, speed) triple the slow-mo replay machinery takes."""
+        return SlowMo(self.start_seconds, self.end_seconds, self.speed)
+
+    def describe(self) -> str:
+        text = f"stitch={self.start_seconds:g}-{self.end_seconds:g}@{self.crop}"
+        return text if self.speed == DEFAULT_STITCH_SPEED else f"{text}@{self.speed:g}"
+
+
+@dataclass(frozen=True)
 class PickSpec:
     """One parsed pick line, before it is matched against a sheet."""
 
@@ -104,6 +143,9 @@ class PickSpec:
     window: tuple[float, float] | None = None  # None = default window around slomo_center_s
     speed: float | None = None  # None = DEFAULT_SLOMO_SPEED
     trim: float | None = None  # second (review-clip timeline) of the goal/moment; None = whole clip
+    trim_range: tuple[float, float] | None = None  # explicit `trim=A-B` window (review-clip seconds)
+    extend: float | None = None  # seconds of source footage appended after the live window
+    stitch: Stitch | None = None
 
 
 @dataclass(frozen=True)
@@ -126,15 +168,26 @@ class ResolvedPick:
     region: str  # left | center | right | near | far | full
     slomo: SlowMo | None
     trim: TrimWindow | None = None  # None = export the row's whole [start, end]
+    extend_seconds: float = 0.0  # source footage appended after the live window
+    stitch: Stitch | None = None
 
     def export_seconds(self) -> tuple[float, float]:
         """[start, end] in session seconds of the LIVE part actually exported:
-        the row's own interval, or its trimmed sub-window. (The slow-mo replay
-        is mapped from the full row interval -- see render.build_replay.)"""
+        the row's own interval, or its trimmed sub-window, plus `extend` seconds
+        of source after it. (The slow-mo / stitch replay is mapped from the full
+        row interval -- see render.build_replay.)"""
         start = float(self.row["start_seconds"])
         if self.trim is None:
-            return start, float(self.row["end_seconds"])
-        return start + self.trim.start_seconds, start + self.trim.end_seconds
+            return start, float(self.row["end_seconds"]) + self.extend_seconds
+        return start + self.trim.start_seconds, start + self.trim.end_seconds + self.extend_seconds
+
+    def live_window(self) -> tuple[float, float] | None:
+        """[t0, t1] of the live part on the review clip's timeline INCLUDING any
+        extension -- what `ScoreOverlay.rebased` needs -- or None when the pick
+        is not trimmed (the overlay then covers the whole clip as it is)."""
+        if self.trim is None:
+            return None
+        return self.trim.start_seconds, self.trim.end_seconds + self.extend_seconds
 
     def describe(self) -> str:
         parts = [f"crop={self.region}"]
@@ -143,12 +196,16 @@ class ResolvedPick:
         if self.slomo is not None:
             s = self.slomo
             parts.append(f"slomo={s.start_seconds:g}-{s.end_seconds:g}@{s.speed:g}")
+        if self.extend_seconds:
+            parts.append(f"extend={self.extend_seconds:g}")
+        if self.stitch is not None:
+            parts.append(self.stitch.describe())
         return " ".join(parts)
 
 
 def _parse_tokens(tokens: list[str]) -> PickSpec:
     ref = tokens[0]
-    if "=" in ref or ref.lower().startswith(("slomo", "crop", "trim")):
+    if "=" in ref or ref.lower().startswith(("slomo", "crop", "trim", "extend", "stitch")):
         raise ValueError(f"the line must start with a rank (e.g. r03), got {ref!r}")
     if _RANK_RE.match(ref):
         ref = ref.lower()
@@ -158,6 +215,9 @@ def _parse_tokens(tokens: list[str]) -> PickSpec:
     window: tuple[float, float] | None = None
     speed: float | None = None
     trim: float | None = None
+    trim_range: tuple[float, float] | None = None
+    extend: float | None = None
+    stitch: Stitch | None = None
     for token in tokens[1:]:
         token = token.lower()
         if token.startswith("crop="):
@@ -183,17 +243,58 @@ def _parse_tokens(tokens: list[str]) -> PickSpec:
                 if not MIN_SLOMO_SPEED <= speed <= MAX_SLOMO_SPEED:
                     raise ValueError(f"slomo speed {speed:g} must be between {MIN_SLOMO_SPEED:g} and {MAX_SLOMO_SPEED:g}")
         elif token.startswith("trim"):
-            if trim is not None:
+            if trim is not None or trim_range is not None:
                 raise ValueError("trim given twice")
             match = _TRIM_RE.match(token)
             if match is None:
-                raise ValueError(f"bad trim token {token!r} (expected trim=N, N = seconds on the review clip, e.g. trim=31)")
-            trim = float(match["n"])
-            if trim <= 0:
-                raise ValueError(f"trim={trim:g} must be greater than 0")
+                raise ValueError(
+                    f"bad trim token {token!r} (expected trim=N or trim=A-B, seconds on the review clip, e.g. trim=31 or trim=20-45)"
+                )
+            if match["b"] is None:
+                trim = float(match["a"])
+                if trim <= 0:
+                    raise ValueError(f"trim={trim:g} must be greater than 0")
+            else:
+                trim_range = (float(match["a"]), float(match["b"]))
+                if trim_range[0] >= trim_range[1]:
+                    raise ValueError(f"trim window {token[len('trim='):]!r} must have A < B")
+        elif token.startswith("extend"):
+            if extend is not None:
+                raise ValueError("extend given twice")
+            match = _EXTEND_RE.match(token)
+            if match is None:
+                raise ValueError(f"bad extend token {token!r} (expected extend=N, N = seconds of source to add, e.g. extend=6)")
+            extend = float(match["n"])
+            if extend <= 0:
+                raise ValueError(f"extend={extend:g} must be greater than 0")
+            if extend > MAX_EXTEND_SECONDS:
+                raise ValueError(f"extend={extend:g} is over the {MAX_EXTEND_SECONDS:g}s cap")
+        elif token.startswith("stitch"):
+            if stitch is not None:
+                raise ValueError("stitch given twice")
+            match = _STITCH_RE.match(token)
+            if match is None:
+                raise ValueError(
+                    f"bad stitch token {token!r} (expected stitch=A-B@CROP or stitch=A-B@CROP@SPEED, e.g. stitch=20-26@far@0.5)"
+                )
+            stitch_crop = match["crop"]
+            if stitch_crop not in CROP_CHOICES:
+                raise ValueError(f"bad stitch crop {stitch_crop!r} (expected {'|'.join(CROP_CHOICES)})")
+            a, b = float(match["a"]), float(match["b"])
+            if a >= b:
+                raise ValueError(f"stitch window {a:g}-{b:g} must have A < B")
+            stitch_speed = float(match["s"]) if match["s"] is not None else DEFAULT_STITCH_SPEED
+            if not 0 < stitch_speed <= 1.0:
+                raise ValueError(f"stitch speed {stitch_speed:g} must be greater than 0 and at most 1")
+            stitch = Stitch(a, b, stitch_crop, stitch_speed)
         else:
             raise ValueError(f"unknown token {token!r}")
-    return PickSpec(ref=ref, crop=crop, slomo=slomo, window=window, speed=speed, trim=trim)
+    if stitch is not None and slomo:
+        raise ValueError("stitch and slomo cannot be combined yet")
+    return PickSpec(
+        ref=ref, crop=crop, slomo=slomo, window=window, speed=speed, trim=trim,
+        trim_range=trim_range, extend=extend, stitch=stitch,
+    )
 
 
 def _parse_lines(text: str) -> tuple[list[PickSpec], list[str]]:
@@ -230,7 +331,9 @@ def default_slomo_window(center_seconds: float, clip_seconds: float) -> tuple[fl
     return (start, end)
 
 
-def trim_window(trim_s: float, duration: float, flip_s: float | None, cfg: TrimConfig) -> TrimWindow:
+def trim_window(
+    trim_s: float, duration: float, flip_s: float | None, cfg: TrimConfig, extend_s: float = 0.0
+) -> TrimWindow:
     """Exported window [t0, t1] on the review-clip timeline for `trim=trim_s`.
 
     Base window is [N - lead, N + tail]. The burned-in counter flips at the TAP
@@ -243,7 +346,9 @@ def trim_window(trim_s: float, duration: float, flip_s: float | None, cfg: TrimC
     `warning` says loudly that the flip falls outside the clip (the scoreboard
     then shows the pre-flip score throughout, see ScoreOverlay.rebased). A flip
     BEFORE t0 needs no handling here: the rebased overlay starts on the
-    post-flip score. Everything is clamped to [0, duration]."""
+    post-flip score. Everything is clamped to [0, duration]. `extend_s` (the pick's
+    `extend=N`) only moves the loud-warning threshold: a flip the extension still
+    covers is not lost."""
     if not 0 < trim_s < duration:
         raise ValueError(f"trim={trim_s:g} must be inside the {duration:.1f}s clip (0 < N < duration)")
     t0 = trim_s - cfg.lead_seconds
@@ -256,13 +361,42 @@ def trim_window(trim_s: float, duration: float, flip_s: float | None, cfg: TrimC
     t0 = max(0.0, t0)
     t1 = min(duration, t1)
     warning = None
-    if flip_s is not None and flip_s >= t1:
+    if flip_s is not None and flip_s >= t1 + extend_s:
         warning = (
             f"score flip at {flip_s:g}s is {flip_s - trim_s:g}s after trim={trim_s:g} and falls OUTSIDE the "
             f"exported window {t0:g}-{t1:g}s -- the scoreboard will not change in this clip "
             f"(slow tap or wrong trim? check the score by hand)"
         )
     return TrimWindow(t0, t1, warning)
+
+
+def explicit_trim_window(
+    start_s: float, end_s: float, duration: float, flip_s: float | None, extend_s: float = 0.0
+) -> TrimWindow:
+    """Exported window for `trim=A-B` (2026-11-20): exactly [A, B] of the review
+    clip, because the human chose both ends.
+
+    Unlike `trim_window` it is NEVER stretched to cover the score-flip tap. A flip
+    after the window (and after any `extend` seconds) is only warned about,
+    loudly: the counter will not flip in that clip. A flip before A needs no
+    handling (the rebased overlay starts on the post-flip score). B past the end
+    of the review clip is clamped to it with a warning -- `extend=N` is the way to
+    go beyond. Raises ValueError when A is not inside the clip."""
+    if start_s >= duration:
+        raise ValueError(f"trim={start_s:g}-{end_s:g} starts at or after the end of the {duration:.1f}s clip")
+    notes: list[str] = []
+    if end_s > duration:
+        notes.append(
+            f"trim={start_s:g}-{end_s:g} ends after the {duration:.1f}s review clip; clamped to {start_s:g}-{duration:.1f} "
+            f"(use extend=N to add source footage after the clip)"
+        )
+        end_s = duration
+    if flip_s is not None and flip_s >= end_s + extend_s:
+        notes.append(
+            f"score flip at {flip_s:g}s falls after the explicit window end {end_s + extend_s:g}s -- the counter will "
+            f"not flip in this clip (the window is never stretched; move B or add extend=N if the number must change)"
+        )
+    return TrimWindow(start_s, end_s, "; ".join(notes) or None)
 
 
 def row_flip_seconds(row: dict[str, str]) -> float | None:
@@ -344,11 +478,30 @@ def resolve_picks(
         region = spec.crop if spec.crop is not None else (row_region(row) if use_sheet_crop else FULL)
         clip_seconds = float(row["end_seconds"]) - float(row["start_seconds"])
         trim: TrimWindow | None = None
-        if spec.trim is not None:
+        extend = spec.extend if spec.extend is not None else 0.0
+        if spec.trim_range is not None:
+            try:
+                trim = explicit_trim_window(*spec.trim_range, clip_seconds, row_flip_seconds(row), extend)
+            except ValueError as exc:
+                errors.append(f"{spec.ref!r}: {exc}")
+                continue
+        elif spec.trim is not None:
             if not 0 < spec.trim < clip_seconds:
                 errors.append(f"{spec.ref!r}: trim={spec.trim:g} is outside the {clip_seconds:.1f}s clip (needs 0 < N < {clip_seconds:.1f})")
                 continue
-            trim = trim_window(spec.trim, clip_seconds, row_flip_seconds(row), trim_cfg)
+            trim = trim_window(spec.trim, clip_seconds, row_flip_seconds(row), trim_cfg, extend)
+        stitch = spec.stitch
+        if stitch is not None:
+            if stitch.end_seconds > clip_seconds + 1e-6:
+                errors.append(
+                    f"{spec.ref!r}: stitch window {stitch.start_seconds:g}-{stitch.end_seconds:g} is outside the {clip_seconds:.1f}s clip"
+                )
+                continue
+            if stitch.end_seconds - stitch.start_seconds < MIN_SLOMO_WINDOW_SECONDS:
+                errors.append(
+                    f"{spec.ref!r}: stitch window {stitch.start_seconds:g}-{stitch.end_seconds:g} is shorter than {MIN_SLOMO_WINDOW_SECONDS:g}s"
+                )
+                continue
         slomo: SlowMo | None = None
         if spec.slomo:
             speed = spec.speed if spec.speed is not None else DEFAULT_SLOMO_SPEED
@@ -362,6 +515,23 @@ def resolve_picks(
                 if end - start < MIN_SLOMO_WINDOW_SECONDS:
                     errors.append(f"{spec.ref!r}: slomo window {start:g}-{end:g} is shorter than {MIN_SLOMO_WINDOW_SECONDS:g}s")
                     continue
+            elif spec.trim_range is not None:
+                # Explicit window: the sheet's dot is the only default we have, and
+                # it only makes sense if it is inside the part the human kept.
+                assert trim is not None
+                center = row_slomo_center(row)
+                if center is None or not trim.start_seconds <= center <= trim.end_seconds:
+                    where = "the sheet has no slomo_center_s" if center is None else f"slomo_center_s={center:g} is outside it"
+                    errors.append(
+                        f"{spec.ref!r}: slomo with trim={trim.start_seconds:g}-{trim.end_seconds:g} defaults to the sheet's dot, "
+                        f"but {where} -- give slomo=A-B explicitly"
+                    )
+                    continue
+                default = default_slomo_window(center, clip_seconds)
+                if default is None:
+                    errors.append(f"{spec.ref!r}: the {clip_seconds:.1f}s clip is too short for a slow-mo replay")
+                    continue
+                start, end = default
             elif spec.trim is not None:
                 # Trimmed pick: the replay is of the goal Kaveh named, not of the
                 # sheet's (possibly different) dot. Still on the review timeline.
@@ -385,7 +555,11 @@ def resolve_picks(
                     continue
                 start, end = default
             slomo = SlowMo(start, min(end, clip_seconds), speed)
-        resolved.append(ResolvedPick(clip_file=clip_file, row=row, region=region, slomo=slomo, trim=trim))
+        resolved.append(
+            ResolvedPick(
+                clip_file=clip_file, row=row, region=region, slomo=slomo, trim=trim, extend_seconds=extend, stitch=stitch
+            )
+        )
     if errors:
         raise PickError(errors)
     return resolved
@@ -394,6 +568,14 @@ def resolve_picks(
 def rect_for_region(region: str, cfg: CropConfig) -> tuple[float, float, float, float] | None:
     """Crop rect (frame fractions) for a region, or None for `full`."""
     return None if region == FULL else crop_rect(region, cfg)
+
+
+def check_crops(pick: ResolvedPick, cfg: CropConfig) -> None:
+    """Resolve every crop the pick uses (live and stitch) so an unconfigured box
+    (`far` with no `crop.boxes.far`) fails up front, with the batch's other
+    validation errors, instead of mid-render. Raises ValueError."""
+    for region in (pick.region, pick.stitch.crop if pick.stitch is not None else FULL):
+        rect_for_region(region, cfg)
 
 
 def load_picks(

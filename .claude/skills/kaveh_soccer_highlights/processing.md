@@ -936,7 +936,8 @@ to Kaveh, unprompted**, so he can write his picks in it (added 2026-10-18). One 
 order:
 
 ```
-<rank> [crop=near|far|wide|left|center|right|full] [trim=N] [slomo | slomo=A-B | slomo=A-B@S | slomo@S]
+<rank> [crop=near|far|wide|left|center|right|full] [trim=N | trim=A-B] [extend=N]
+      [slomo | slomo=A-B | slomo=A-B@S | slomo@S] [stitch=A-B@CROP[@S]]
 
 r03                       # export as-is; crop = the sheet's action_region (the cyan box)
 r04 trim=58               # export [48s, 62s] around the goal; extended to cover the tap
@@ -944,6 +945,10 @@ r05 crop=left             # the box was wrong -> override the crop
 r07 slomo                 # replay [dot-3.5s, dot+1s] at 0.25x, appended after the clip
 r07 slomo=6.5-9           # custom window, seconds on the review clip's own timeline
 r09 slomo=4-7@0.5 crop=full   # custom speed; full = no crop
+r01 slomo trim=0-25       # export exactly [0s, 25s]; replay centred on the sheet's dot
+r23 extend=6              # whole review clip plus 6 more seconds from the source
+r55 stitch=20-26@far      # after the live clip, replay 20-26s cut with the far box, normal speed
+r55 stitch=20-26@far@0.5  # same at half speed
 ```
 
 - `<rank>` = the `rNN` prefix of the rank-named review file (`r3` and a full
@@ -971,6 +976,28 @@ r09 slomo=4-7@0.5 crop=full   # custom speed; full = no crop
   on the original review-clip timeline. Tokens may be separated by spaces
   and/or commas, any case (`R04 trim=58, slomo`). Defaults: `trim:` in
   `config/default.yaml`.
+- `trim=A-B` (2026-11-20; Kaveh usually gives start-end seconds when shortening a
+  long clip -- `trim=N` stays for the single-second form), A < B in seconds on the
+  review clip's timeline, A >= 0: exports exactly [A, B]. **Never auto-stretched**
+  to cover the score-flip tap (the human chose the window); a flip after B prints a
+  loud `WARNING` that the counter will not flip in that clip, a flip before A
+  starts the clip on the post-flip score. B past the clip's end is clamped to it
+  with a printed warning (`extend` is how to go past it). `slomo` with `trim=A-B`
+  and no explicit window centres on the sheet's dot, but only if the dot lies
+  inside [A, B]; otherwise validation fails and asks for `slomo=A-B` (no guessing).
+- `extend=N` (2026-11-20), 0 < N <= 30: adds N seconds of SOURCE footage after
+  the live window (after any trim), so `r23 extend=6` is the whole review clip plus
+  6s from the card. Crosses chunk boundaries like any other export; scoreboard
+  and clock keep running through the added seconds. A warning prints if the
+  footage runs out. Slow-mo/stitch windows are unaffected.
+- `stitch=A-B@CROP[@S]` (2026-11-20): after the live clip (in its own crop), append
+  a replay of review-clip seconds [A, B] cut with `CROP` (any `crop=` value; named
+  boxes resolve through the same config lookup) at normal speed, or at
+  speed S in (0, 1] (`@0.5`). Audio: the source audio at normal speed, muted (silent
+  AAC track) only when S != 1 (Kaveh, 2026-11-21); scoreboard with the score
+  as of the replay's source moment, clock on true wall-clock, REPLAY badge (the
+  speed is shown only when S != 1). One `stitch` per pick; **it cannot be combined
+  with `slomo` yet** (validation error).
 - Save the lines as-is to `Review\picks.txt` (UTF-8) and pass it straight to
   Step 4. Every line is validated before anything renders; all bad lines are
   reported together.
@@ -1021,14 +1048,25 @@ exclusive. `--no-crop` ignores the sheet's `action_region` for the whole run.
   seg_render's `plan.json` all follow the trimmed window. The slow-mo replay is
   still cut from the full clip and keeps the original-timeline score. A trimmed
   clip over ~15s still goes through `seg_render.py`.
+  `trim=A-B` (2026-11-20, `picks.explicit_trim_window`) takes the same path with
+  exactly [A, B] and no tap stretch; `extend=N` lengthens the live interval, so
+  slices, clock epoch and scoreboard follow it (`ResolvedPick.live_window`).
+- **Stitch** (2026-11-20): reuses the slow-mo replay machinery
+  (`render.build_pick_replay`): silent-AAC track only when slowed (a 1x stitch keeps the source audio), identical encode
+  settings, stream-copy concat, replay-timeline score and clock; its pieces carry
+  their own crop and speed, and the REPLAY badge omits the speed at 1x. In
+  `seg_render.py` it is the last resumable segment, and its window, crop and
+  resolved box are in `plan.json`, so changing the stitch (or a config box)
+  discards stale segments. Budget like slow-mo: output seconds = window / speed.
 - **Re-exporting a pick with different options**: `export-picks` skips an
   existing playable output regardless of crop/slow-mo -- delete the old file
   first.
 - **`seg_render.py`** (clips >15s) takes the same grammar: `--pick "r07
   slomo=6.5-9 crop=left"` inline, or `--clip r07 --picks-file picks.txt`. The
-  replay is its last resumable segment, and a `plan.json` next to the
-  segments discards stale segments if the crop/slow-mo plan changed between
-  runs.
+  replay (slow-mo or stitch) is its last resumable segment, and a `plan.json`
+  next to the segments discards stale segments if the crop / slow-mo / stitch /
+  trim / extend plan changed between runs. Examples: `--pick "r23 extend=6"`,
+  `--pick "r55 stitch=20-26@far@0.5"`.
 Re-encodes just the picked clips (by `clip_file`, reading start/end straight from
 the sheet -- no re-detection, no index-drift risk) from the **full-res 4K `.MP4`**
 (never the `.LRF`) at `export.*` settings, with `--crf` overriding the archival

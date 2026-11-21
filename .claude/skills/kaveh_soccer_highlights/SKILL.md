@@ -340,6 +340,12 @@ marks) -> posted to a Telegram group with the Farsi caption.
   after, stretched to cover the score-flip tap, capped at N+15s with a loud
   warning); Kaveh gives just that one number. The scoreboard is rebased onto
   the window and the counter still flips at the TAP, not the goal.
+  2026-11-20: Kaveh usually gives start-end seconds when shortening a long
+  clip, so `trim=A-B` exports exactly [A, B] (never stretched to the tap; a
+  loud warning if the flip falls after B); `trim=N` stays for the single-second
+  form. `extend=N` (<=30) adds N seconds of source after the clip's end;
+  `stitch=A-B@crop[@speed]` appends a replay of A-B in another crop (muted only if slowed)
+  (normal speed unless `@speed`), and cannot be combined with `slomo` yet.
 - **Recall-first.** Throughout audio tuning and vision work, the standing priority
   is "don't miss real events" over "don't bombard with false positives." A change
   that only cuts precision at the cost of recall is not obviously a net win.

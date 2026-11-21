@@ -349,7 +349,7 @@ def cmd_export_picks(
     detection config has changed since the sheet was generated.
 
     `pick_text` is pick-line syntax (see soccer_highlights.picks): one pick per
-    line, `<rank> [crop=...] [trim=N] [slomo...]`; plain clip_file names work too, which
+    line, `<rank> [crop=...] [trim=N|A-B] [extend=N] [slomo...] [stitch=...]`; plain clip_file names work too, which
     is how `--clips` feeds in. Every pick is parsed, matched to its row and
     given its crop region / slow-mo window BEFORE the first frame is rendered
     (2026-10-18) -- a ~37x-realtime batch must not discover a typo in pick 9
@@ -361,7 +361,13 @@ def cmd_export_picks(
     picks.trim_window): the interval below is the TRIMMED one, so slices and
     the burned-in clock epoch follow it, and the scoreboard is rebased onto it.
     The slow-mo replay is still mapped from the row's full interval (its window
-    is on the original review-clip timeline) and keeps the un-rebased score."""
+    is on the original review-clip timeline) and keeps the un-rebased score.
+
+    `trim=A-B`, `extend=N` and `stitch=A-B@crop[@speed]` (2026-11-20): an explicit
+    trim exports exactly [A, B] (never stretched to the score tap); `extend` adds
+    source seconds after the live window, so the interval below (and the clock
+    epoch / score rebase) already include them; a stitch is appended like the
+    slow-mo replay, cut with its own crop."""
     from soccer_highlights import picks as picks_mod
 
     with open(review_sheet_path, encoding="utf-8-sig") as f:
@@ -372,7 +378,8 @@ def cmd_export_picks(
         plans: list[tuple[picks_mod.ResolvedPick, Interval, render.Replay | None]] = []
         for pick in resolved:
             full = Interval(start_seconds=float(pick.row["start_seconds"]), end_seconds=float(pick.row["end_seconds"]))
-            replay = render.build_replay(full, pick.slomo, chunks) if pick.slomo is not None else None
+            picks_mod.check_crops(pick, cfg.crop)
+            replay = render.build_pick_replay(pick, full, chunks, cfg.crop)
             start, end = pick.export_seconds()
             plans.append((pick, Interval(start_seconds=start, end_seconds=end), replay))
     except (picks_mod.PickError, ValueError) as exc:
@@ -380,9 +387,16 @@ def cmd_export_picks(
         raise SystemExit(f"Bad pick(s) for {review_sheet_path}, nothing rendered:\n  {details}")
     if not plans:
         raise SystemExit("No picks given")
-    for pick, _, _ in plans:
+    for pick, interval, _ in plans:
         if pick.trim is not None and pick.trim.warning:
             print(f"!! WARNING {pick.clip_file}: {pick.trim.warning}", flush=True)
+        shortfall = render.footage_shortfall(interval, map_interval_to_chunks(interval, chunks)) if pick.extend_seconds else 0.0
+        if shortfall > 0.05:
+            print(
+                f"!! WARNING {pick.clip_file}: extend={pick.extend_seconds:g} runs past the available source footage "
+                f"({shortfall:.1f}s missing) -- the clip will be shorter than asked",
+                flush=True,
+            )
 
     export_cfg = cfg.export
     if crf_override is not None:
@@ -406,7 +420,8 @@ def cmd_export_picks(
                 clip_path.unlink()
             slices = map_interval_to_chunks(interval, chunks)
             score = render.ScoreOverlay.from_sheet_row(pick.row)
-            live_score = score.rebased(pick.trim.start_seconds, pick.trim.end_seconds) if score and pick.trim else score
+            window = pick.live_window()
+            live_score = score.rebased(*window) if score and window else score
             crop = picks_mod.rect_for_region(pick.region, cfg.crop)
             print(
                 f"Exporting {i + 1}/{len(plans)}: {clip_path.name} "
@@ -1489,8 +1504,9 @@ def main() -> None:
     )
     picks_source.add_argument(
         "--picks-file",
-        help="Text file, one pick per line: '<rank> [crop=left|center|right|near|far|wide|full] [trim=N] [slomo|slomo=A-B|slomo=A-B@S|slomo@S]' "
-        "(e.g. 'r05 crop=left', 'r07 slomo=6.5-9', 'r09 slomo=4-7@0.5 crop=full', 'r04 trim=58'); '#' comments and blank lines ignored",
+        help="Text file, one pick per line: '<rank> [crop=left|center|right|near|far|wide|full] [trim=N|trim=A-B] [extend=N] [slomo|slomo=A-B|slomo=A-B@S|slomo@S] [stitch=A-B@CROP[@S]]' "
+        "(e.g. 'r05 crop=left', 'r07 slomo=6.5-9', 'r09 slomo=4-7@0.5 crop=full', 'r04 trim=58', 'r01 slomo trim=0-25', "
+        "'r23 extend=6', 'r55 stitch=20-26@far@0.5'); '#' comments and blank lines ignored",
     )
     picks_source.add_argument(
         "--picks", help="Same syntax as --picks-file, inline, picks separated by ';' (e.g. \"r03; r05 crop=left\")"

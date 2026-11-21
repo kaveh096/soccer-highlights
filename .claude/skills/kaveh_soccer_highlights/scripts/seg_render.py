@@ -39,6 +39,14 @@ Correctness notes worth keeping in mind:
     discards the old segments. The scoreboard is rebased onto the trimmed
     window for the live segments; the slow-mo replay stays on the original
     review-clip timeline with the un-rebased score.
+  * `trim=A-B`, `extend=N`, `stitch=A-B@CROP[@S]` (2026-11-20) take the same
+    grammar. An explicit trim is the live interval exactly (never stretched to the
+    score tap); `extend` lengthens the live interval with source footage, split
+    into segments across chunk boundaries like any other; a stitch is a replay
+    built from the same machinery as the slow-mo replay -- the LAST resumable
+    segment(s), own crop (muted only if slowed), score as of its source moment -- and it (with
+    its resolved crop box) is part of plan.json, so changing it discards stale
+    segments.
 
 Usage (run from repo root, with the project venv). Repeat the same command
 until it prints DONE:
@@ -52,7 +60,8 @@ until it prints DONE:
       [--seg-seconds 11.0] [--max-segments 1]
 
 Crop / slow-mo, same grammar as export-picks' pick lines
-(`<rank> [crop=left|center|right|full] [trim=N] [slomo|slomo=A-B|slomo=A-B@S|slomo@S]`):
+(`<rank> [crop=left|center|right|near|far|wide|full] [trim=N|A-B] [extend=N]
+[slomo|slomo=A-B|slomo=A-B@S|slomo@S] [stitch=A-B@CROP[@S]]`):
 
   # one inline pick instead of --clip (the rank resolves against the sheet):
   ... --pick "r07 slomo=6.5-9 crop=left" ...
@@ -92,7 +101,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from soccer_highlights import picks, render  # noqa: E402
-from soccer_highlights.config import TrimConfig, load_config  # noqa: E402
+from soccer_highlights.config import CropConfig, TrimConfig, load_config  # noqa: E402
 from soccer_highlights.discovery import discover_chunks, slice_start_epoch  # noqa: E402
 from soccer_highlights.timeline import Interval, map_interval_to_chunks  # noqa: E402
 
@@ -122,11 +131,12 @@ class ReplaySegment:
         return self.piece.output_seconds
 
     def describe(self) -> str:
-        return f"slo-mo replay {self.piece.duration:.2f}s source -> {self.piece.output_seconds:.2f}s @ {self.piece.speed:g}x"
+        kind = "stitch replay" if self.piece.own_crop else "slo-mo replay"
+        return f"{kind} {self.piece.duration:.2f}s source -> {self.piece.output_seconds:.2f}s @ {self.piece.speed:g}x"
 
 
 def _select_pick(
-    args: argparse.Namespace, rows: list[dict[str, str]], trim_cfg: TrimConfig
+    args: argparse.Namespace, rows: list[dict[str, str]], trim_cfg: TrimConfig, crop_cfg: CropConfig
 ) -> picks.ResolvedPick:
     """Resolve the one pick to render from --pick / --clip [+ --picks-file]."""
     if args.pick:
@@ -199,7 +209,7 @@ def main() -> None:
     with open(args.review_sheet, encoding="utf-8-sig") as f:
         rows = list(csv.DictReader(f))
     cfg = load_config()
-    pick = _select_pick(args, rows, cfg.trim)
+    pick = _select_pick(args, rows, cfg.trim, cfg.crop)
     row = pick.row
     clip_file = pick.clip_file
 
@@ -218,16 +228,24 @@ def main() -> None:
     live_start, live_end = pick.export_seconds()
     interval = Interval(start_seconds=live_start, end_seconds=live_end)
     slices = map_interval_to_chunks(interval, chunks)
-    if pick.trim is not None:
-        print(f"trim: {pick.describe()} -> {interval.end_seconds - interval.start_seconds:.1f}s of {full.end_seconds - full.start_seconds:.1f}s", flush=True)
-        if pick.trim.warning:
-            print(f"!! WARNING {clip_file}: {pick.trim.warning}", flush=True)
+    if pick.trim is not None or pick.extend_seconds:
+        print(f"window: {pick.describe()} -> {interval.end_seconds - interval.start_seconds:.1f}s of {full.end_seconds - full.start_seconds:.1f}s", flush=True)
+    if pick.trim is not None and pick.trim.warning:
+        print(f"!! WARNING {clip_file}: {pick.trim.warning}", flush=True)
+    shortfall = render.footage_shortfall(interval, slices) if pick.extend_seconds else 0.0
+    if shortfall > 0.05:
+        print(
+            f"!! WARNING {clip_file}: extend={pick.extend_seconds:g} runs past the available source footage "
+            f"({shortfall:.1f}s missing) -- the clip will be shorter than asked",
+            flush=True,
+        )
     # Same sheet columns export-picks reads, so a clip rendered here gets the
     # identical score overlay it would have got from a single-shot export. A
     # trimmed pick's live segments get it rebased onto the trimmed window
     # (`score`); the replay keeps the original-timeline overlay (`full_score`).
     full_score = render.ScoreOverlay.from_sheet_row(row)
-    score = full_score.rebased(pick.trim.start_seconds, pick.trim.end_seconds) if full_score and pick.trim else full_score
+    window = pick.live_window()
+    score = full_score.rebased(*window) if full_score and window else full_score
     crop = picks.rect_for_region(pick.region, cfg.crop)
 
     # Flatten the per-chunk slices into sub-segments short enough to finish
@@ -259,8 +277,10 @@ def main() -> None:
     # The replay goes last, after the whole live clip (2026-10-18). Its pieces
     # carry the clip-relative offset of the window (not the end of the clip),
     # because that is what the score flip and the true-time clock key on.
-    if pick.slomo is not None:
-        segments.extend(ReplaySegment(p) for p in render.replay_pieces(render.build_replay(full, pick.slomo, chunks)))
+    # A stitch (2026-11-20) is built the same way, with its own crop and speed.
+    replay = render.build_pick_replay(pick, full, chunks, cfg.crop)
+    if replay is not None:
+        segments.extend(ReplaySegment(p) for p in render.replay_pieces(replay))
 
     seg_dir = out_dir / f".segs_{final_path.stem}"
     seg_dir.mkdir(exist_ok=True)
@@ -272,10 +292,17 @@ def main() -> None:
         "crf": args.crf,
         "seg_seconds": args.seg_seconds,
     }
-    if pick.trim is not None:
-        # Only for trimmed picks, so segments of an in-progress UNtrimmed render
-        # keep matching their old plan.json instead of being discarded.
+    if pick.trim is not None or pick.extend_seconds:
+        # Only for trimmed / extended picks, so segments of an in-progress plain
+        # render keep matching their old plan.json instead of being discarded.
         plan["interval"] = [round(interval.start_seconds, 3), round(interval.end_seconds, 3)]
+    if pick.stitch is not None:
+        stitch = pick.stitch
+        rect = picks.rect_for_region(stitch.crop, cfg.crop)
+        plan["stitch"] = [
+            stitch.start_seconds, stitch.end_seconds, stitch.crop, stitch.speed,
+            [round(v, 6) for v in rect] if rect is not None else None,
+        ]
     _write_plan(seg_dir, plan)
 
     rendered = 0
