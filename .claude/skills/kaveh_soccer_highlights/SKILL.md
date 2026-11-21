@@ -270,13 +270,18 @@ marks) -> posted to a Telegram group with the Farsi caption.
   Sorting happens inside the command itself, by the sheet's
   `start_seconds` -- nothing to remember when picking clips off the ranked
   sheet, which is naturally NOT chronological order.
-- **Step 5b (the raw-footage Drive-link announcement) is now a standard part
-  of every week's posting, not an occasional extra** (settled 2026-09-08,
-  was previously framed as optional). Ask Kaveh for the Drive share link if
-  you don't have it yet; don't skip the step for not having it. **2026-11-08:
-  raw video is no longer copied to Drive, so confirm with Kaveh what this
-  message should say before sending one -- see Step 5b's flag; don't invent new
-  Farsi text.**
+- **Step 5b is now the "final message" of every game** (Kaveh, 2026-11-21;
+  it began as the raw-footage Drive-link announcement, settled 2026-09-08, and
+  stopped being about raw footage on 2026-11-15). One short Farsi message, plain
+  sentences with NO bullet points, after the clips and timelapse are posted: how
+  many clips were posted, the final score, when the game was played (date and
+  time), where the Drive folder is (the Review folder holds every candidate, the
+  Share folder the posted clips -- the link is the same every week and lives in
+  Claude's private memory, `reference_raw_footage_drive_link.md`, NOT in this
+  public repo), then the weather for BOTH Sundays at the Adabestan Persian School
+  (zip 95126) -- how it was on game day and the forecast for the upcoming Sunday
+  -- each only if data is available. Details, the
+  template and the weather lookup are in processing.md Step 5b.
 - **A game's watch-tagging quirks are worth a dedicated post-export pass, not
   fixed reactively mid-review.** Sep-06 was the first real game with Tallies
   data, and surfaced things worth analyzing properly once the picks are

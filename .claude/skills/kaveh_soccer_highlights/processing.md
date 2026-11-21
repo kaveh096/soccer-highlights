@@ -184,7 +184,7 @@ position (0d) -> crop boxes confirmed (0e) -> late taps retimed + the pre-flight
 checklist (Step 1) -> `pre-label` (~45 min, card as source) -> `name-candidates`
 (1b) -> **whole-game timelapse (Step 6, ~20 min idle, every game)** -> print the
 pick format; Kaveh reviews and picks -> exports from the card -> post clips ->
-post the timelapse -> Step 5b message (flagged, see there). The timelapse is the
+post the timelapse -> Step 5b final message. The timelapse is the
 one heavy job between 1b and review; don't start anything else heavy alongside it.
 
 **Older games only** (footage already on Drive): if Drive sync is flaky reading
@@ -678,7 +678,7 @@ the marks and fills in four `score_*` columns.** Two things to do with that:
   last goal of the game, no posted clip will ever show the true final
   score, even with perfectly correct data. Not a bug, just how the flip
   design works; mention the real final score separately (e.g. in the Step
-  5b raw-footage message) if the picks don't happen to end on the last goal.
+  5b final message) if the picks don't happen to end on the last goal.
 - **A tap that lands outside its own clip** (see Step 0c) makes that clip's
   score flip at a midpoint instead of visibly at the tap -- `pre-label`
   prints the same list Step 0c does, worth a glance here too since it now
@@ -1269,46 +1269,74 @@ clips also keeps any single failure cheap, and the sent-file makes resuming free
 `--review-sheet` here only needs `clip_file`/`gemini_caption` -- point it at the
 **original** `review_sheet.csv`, not an Excel-edited copy (Step 2's warning).
 
-### Step 5b -- announce where the raw footage lives (`telegram-message`)
+### Step 5b -- the final group message (`telegram-message`)
 
-> **FLAG (2026-11-08): raw video is no longer copied to Drive, so this message
-> no longer matches reality for new games.** Do NOT send it as-is and do NOT
-> write new Farsi text: ask Kaveh what the message should say now (or whether
-> to send one at all). The template and mechanics below are kept unchanged for
-> when he confirms.
+**Every game, after the clips and the timelapse are posted** (Kaveh, 2026-11-21).
+Until 2026-11-15 this was the "raw footage lives here" announcement; raw video no
+longer goes to Drive, but the shared Drive folder still holds the Review
+candidates and the Share exports, so the message stays and its job changed. Past
+versions (Aug-30, Oct-04/11/18/25, Nov-01, Nov-08) were checked when this was
+rewritten, and the useful parts of each are folded in below.
 
-**Standard, every game (settled 2026-09-08 -- was "optional/occasional"
-before, now always do this).** Kaveh uploads the full, unedited game
-footage to a Google Drive folder and wants a short Farsi text message
-posted to the group pointing players at it, separate from the per-clip
-highlight posts. **The share link is the same for every game** (Kaveh,
-2026-10-31) and lives in Claude's private memory
-(`reference_raw_footage_drive_link.md`), NOT in this repo -- the GitHub repo is
-public, and the link would expose the players' footage. Read it from memory; if
-memory is unavailable, ask him. (Until Kaveh confirms the new wording, the "footage must already be in
-its `Raw\` folder on Drive" condition no longer holds for new games.) Use
-`telegram-message` (added 2026-08-31), not `telegram-post` -- this is a
-one-off plain-text `sendMessage`, no video attachment:
+**What it says -- a few Farsi sentences, plain prose, NO bullet points:**
+1. How many clips were posted (the highlight clips; mention the whole-game
+   timelapse separately if it went out).
+2. The final score, white first: `سفید ۳ - ۲ مشکی` (the score at the end of the
+   real game, not the last scoreboard value if the camera died early).
+3. When the game happened: the date and the clock time it was played (first to
+   last recorded chunk on the card, `ingest-marks`/`name-candidates` print the
+   local times; e.g. Sunday 15 Nov, about 9:45 to 11:30).
+4. Where the Drive folder is: the shared Sunday Soccer link, then
+   `<date> ← Review` (every candidate clip, not only the highlights) and
+   `Share` (what was posted). The link is the same every week and lives in
+   Claude's private memory (`reference_raw_footage_drive_link.md`) -- never in
+   this public repo. Read it from memory; ask Kaveh if memory is unavailable.
+5. **Weather for BOTH Sundays, each only if data is available** (Kaveh,
+   2026-11-21: past messages carried only the game day's weather; now both).
+   Location is the Adabestan Persian School, **651 Dana Ave, San Jose, CA 95126**
+   (AccuWeather location key 347630 for 95126). Load the AccuWeather tools with
+   ToolSearch first (`widgets-search-claude`, `-daily-claude`, `-hourly-claude`,
+   `-historical-claude`), otherwise a web search.
+   - *The game that happened*: what the weather was on game day. AccuWeather's
+     historical tool returns only climate normals, not observed weather (checked
+     Nov-08 and Nov-15), so use what Kaveh told you at the start of the session
+     (Nov-15: "perfect weather") or what the footage plainly shows (sunny, clear,
+     overcast, wet) -- one short clause, no invented temperatures. If neither
+     exists, leave it out.
+   - *The upcoming Sunday* (the next calendar Sunday after the day you post;
+     posting on a Sunday means the following one): the daily forecast for that
+     date -- sky, high temperature (give °C with °F in brackets) and rain
+     chance. The daily forecast covers the whole day and the hourly one only the
+     next ~12 hours, so say it is for the whole day rather than implying a
+     morning figure you do not have.
+   **Never invent or guess either one**; a missing half is simply omitted.
+6. Only if it applies, one sentence on anything that makes the clips misleading
+   -- the camera died early and the last goals are unrecorded, a goal was
+   outside the frame, some clips are muted for privacy (Oct-18's message had all
+   three). Do not name scorers (no face recognition, Kaveh's rule from Nov-08).
+
+Mechanics (`telegram-message`, added 2026-08-31, a one-off plain-text
+`sendMessage`, no video):
 
 ```bash
 cd C:/dev/soccer-highlights
-PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe -m soccer_highlights.cli \
-  telegram-message \
-  --text-file "<path to a UTF-8 .txt with the Farsi message>" \
-  --dry-run
+PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe -m soccer_highlights.cli   telegram-message --text-file "<UTF-8 .txt with the Farsi message>" --dry-run
 ```
-then the same command minus `--dry-run` to actually send. **Always write the
-Farsi text to a UTF-8 file first and pass `--text-file`, not `--text` with
-the message inline on the command line** -- passing RTL text as a raw shell
-argument risks the same class of console/shell-encoding mangling as Step 2's
-Excel mojibake warning, and there's no `.telegram_sent.json`-style guard
-against a duplicate send here, so get the dry-run output right before
-sending for real. The Aug-30 game's message (a template to adapt, not a
-fixed script):
+then the same command minus `--dry-run` (add `--silent` at night). **Always write
+the Farsi text to a UTF-8 file and pass `--text-file`**, never the text inline on
+the command line -- RTL text as a raw shell argument risks the same
+console-encoding mangling as Step 2's mojibake warning, and unlike clips there is
+no `.telegram_sent.json` guard against a duplicate send, so get the dry-run output
+right before sending for real. Write the file from Python with
+`encoding='utf-8'` (Write tool is fine too) and read the dry-run back.
+
+Shape of the Nov-21 message, as a template (not a fixed script; the numbers,
+dates, link and forecast change every week):
 
 ```
-سلام به همه بچه‌ها! ویدیوهای کامل و خام بازی این هفته رو می‌تونید توی این پوشه گوگل درایو ببینید:
-<Google Drive folder link>
+سلام به همه! این هفته ۱۹ کلیپ و تایم‌لپس کل بازی رو گذاشتم. نتیجه نهایی بازی سفید ۳ - ۲ مشکی شد؛ بازی یکشنبه ۱۵ نوامبر از حدود ۹:۴۵ تا ۱۱:۳۰ بود. همه کلیپ‌های کاندید توی پوشه Review و کلیپ‌های ارسال‌شده توی پوشه Share این بازی هست:
+<Drive link> ← 2026-Nov-15
+هوای بازی: <یک عبارت کوتاه>. پیش‌بینی هوا برای یکشنبه آینده در مدرسه ادبستان (سن‌هوزه): <آسمان، دما، احتمال باران>.
 ```
 
 ### Step 6 -- whole-game timelapse, EVERY game (`timelapse_render.py`)
